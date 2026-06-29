@@ -38,6 +38,9 @@ ASSETS_DIR = ROOT / "assets"
 MUSIC_RATIO_THRESHOLD = 0.13
 DEMUCS_MODEL = os.getenv("HALALSTREAM_DEMUCS_MODEL", "htdemucs")
 DEMUCS_JOBS = int(os.getenv("HALALSTREAM_DEMUCS_JOBS", "1"))
+HOSTED_SPACE = bool(os.getenv("SPACE_ID") or os.getenv("SPACE_HOST"))
+ALLOW_LINK_DOWNLOADS = os.getenv("HALALSTREAM_ALLOW_LINK_DOWNLOADS", "").strip().lower() in {"1", "true", "yes"}
+LINK_DOWNLOADS_RELIABLE = (not HOSTED_SPACE) or ALLOW_LINK_DOWNLOADS
 YOUTUBE_CLIENT_FALLBACKS = tuple(
     (client.strip(),)
     for client in os.getenv("HALALSTREAM_YOUTUBE_CLIENTS", "android,web,mweb").split(",")
@@ -86,12 +89,19 @@ def health() -> Dict[str, Any]:
         "demucs": has_module("demucs"),
         "demucs_model": DEMUCS_MODEL,
         "demucs_jobs": DEMUCS_JOBS,
+        "hosted_space": HOSTED_SPACE,
+        "link_downloads_reliable": LINK_DOWNLOADS_RELIABLE,
         "message": "الخادم يعمل. اكتمال المعالجة يحتاج yt-dlp و ffmpeg و demucs.",
     }
 
 
 @app.post("/api/jobs/link")
 def create_link_job(payload: LinkJobRequest) -> Dict[str, str]:
+    if is_youtube_url(str(payload.url)) and not LINK_DOWNLOADS_RELIABLE:
+        raise HTTPException(
+            status_code=400,
+            detail="الاستضافة المجانية الحالية لا تنزّل روابط YouTube بثبات. نزّل الملف على جهازك ثم ارفعه من تبويب ملف، أو انقل الخادم إلى VPS أقوى.",
+        )
     job = create_job("link", source_url=str(payload.url))
     start_worker(process_job, job["id"])
     return {"id": job["id"]}
@@ -398,10 +408,14 @@ def download_link(job_id: str, url: str) -> Path:
 
 
 def youtube_download_clients(url: str) -> tuple[tuple[str, ...], ...]:
-    lowered = url.lower()
-    if "youtube.com" in lowered or "youtu.be" in lowered:
+    if is_youtube_url(url):
         return YOUTUBE_CLIENT_FALLBACKS
     return ((),)
+
+
+def is_youtube_url(url: str) -> bool:
+    lowered = url.lower()
+    return "youtube.com" in lowered or "youtu.be" in lowered
 
 
 def build_ydl_options(workdir: Path, job_id: str, youtube_clients: tuple[str, ...]) -> Dict[str, Any]:

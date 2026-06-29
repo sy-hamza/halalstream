@@ -13,6 +13,7 @@ const decisionOverlay = document.querySelector("#decision-overlay");
 const decisionPurifyButton = document.querySelector("#decision-purify-button");
 const retryButton = document.querySelector("#retry-button");
 const formError = document.querySelector("#form-error");
+const hostingNote = document.querySelector("#hosting-note");
 const serverPill = document.querySelector("#server-pill");
 const serverText = document.querySelector("#server-text");
 const jobHeading = document.querySelector("#job-heading");
@@ -47,6 +48,7 @@ let elapsedTimer = null;
 let jobStartedAt = null;
 let lastLogMessage = "";
 let serverReady = false;
+let linkDownloadsReliable = true;
 
 const waitingNotes = [
   "يمكنك ترك الصفحة مفتوحة والرجوع لاحقاً؛ خادم المعالجة سيكمل العمل ما دام السيرفر شغالاً.",
@@ -205,15 +207,30 @@ async function checkHealth() {
     }
     const health = await response.json();
     serverReady = Boolean(health.ok && health.ffmpeg && health.yt_dlp && health.demucs);
+    linkDownloadsReliable = health.link_downloads_reliable !== false;
+    hostingNote.hidden = linkDownloadsReliable;
     serverPill.classList.toggle("is-ready", serverReady);
     serverPill.classList.toggle("is-error", !serverReady);
     engineMode.textContent = "جودة عالية";
-    engineJobs.textContent = "ثابت";
+    engineJobs.textContent = linkDownloadsReliable ? "ثابت" : "رفع الملفات أفضل";
 
     if (serverReady) {
       serverText.textContent = "الخادم يعمل";
-      updateStatus("خادم المعالجة جاهز", "أرسل رابطاً أو ملفاً، وسنوقف التحميل إن ظهرت معازف حتى تختار إزالتها.", 0);
-      resetLog("الخادم جاهز. أرسل المقطع، ويمكنك متابعة الصفحة أو الرجوع لها لاحقاً.");
+      if (!linkDownloadsReliable && activeMode === "link") {
+        setMode("file");
+      }
+      updateStatus(
+        "خادم المعالجة جاهز",
+        linkDownloadsReliable
+          ? "أرسل رابطاً أو ملفاً، وسنوقف التحميل إن ظهرت معازف حتى تختار إزالتها."
+          : "ارفع ملفاً من جهازك للحصول على نتيجة أثبت على الاستضافة المجانية الحالية.",
+        0
+      );
+      resetLog(
+        linkDownloadsReliable
+          ? "الخادم جاهز. أرسل المقطع، ويمكنك متابعة الصفحة أو الرجوع لها لاحقاً."
+          : "الخادم جاهز. رفع الملف مباشرة هو المسار الأنسب لهذه الاستضافة المجانية."
+      );
       await restoreLatestJob();
       return;
     }
@@ -259,6 +276,9 @@ async function createJob() {
       throw new Error("ضع رابط المقطع أولاً.");
     }
     const url = /^[a-z][a-z0-9+.-]*:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
+    if (!linkDownloadsReliable && isYouTubeUrl(url)) {
+      throw new Error("روابط YouTube لا تعمل بثبات على الاستضافة المجانية الحالية. نزّل الملف على جهازك ثم ارفعه من تبويب ملف.");
+    }
     const response = await fetch("/api/jobs/link", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -495,6 +515,11 @@ function humanLog(job) {
 function pickWaitingNote() {
   const seconds = Math.floor(Date.now() / 1000);
   return waitingNotes[Math.floor(seconds / 8) % waitingNotes.length];
+}
+
+function isYouTubeUrl(url) {
+  const lowered = url.toLowerCase();
+  return lowered.includes("youtube.com") || lowered.includes("youtu.be");
 }
 
 function startElapsedTimer() {

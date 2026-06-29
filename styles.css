@@ -426,6 +426,22 @@ h1 {
   box-shadow: 0 10px 22px rgba(18, 32, 30, 0.08);
 }
 
+.hosting-note {
+  margin: -6px 0 18px;
+  border: 1px solid rgba(182, 129, 52, 0.22);
+  border-radius: 8px;
+  padding: 11px 13px;
+  color: #6e4b17;
+  background: rgba(255, 248, 226, 0.78);
+  font-size: 0.9rem;
+  font-weight: 800;
+  line-height: 1.8;
+}
+
+.hosting-note[hidden] {
+  display: none;
+}
+
 .media-form,
 .mode-pane {
   display: grid;
