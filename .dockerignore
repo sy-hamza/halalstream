@@ -5,6 +5,7 @@ __pycache__
 .agents
 storage/jobs
 tools/ffmpeg
+secrets
 *.log
 *.tmp
 node_modules

@@ -1,6 +1,7 @@
 .venv/
 .agents/
 assets/*.png
+secrets/
 storage/
 tools/ffmpeg/
 __pycache__/
