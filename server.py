@@ -466,6 +466,10 @@ def cleanup_partial_downloads(workdir: Path) -> None:
 
 def youtube_download_error(errors: list[str]) -> str:
     last_error = errors[-1] if errors else "لم يصل تفصيل من yt-dlp."
+    if "Sign in to confirm" in last_error or "not a bot" in last_error or "cookies" in last_error.lower():
+        return (
+            "طلب YouTube إثبات أن الخادم ليس روبوتاً. نحتاج ملف cookies من متصفحك لتفعيل تنزيل روابط YouTube على هذا الخادم."
+        )
     if "UNEXPECTED_EOF_WHILE_READING" in last_error or "SSL" in last_error:
         return (
             "تعذر تنزيل الرابط من YouTube داخل الاستضافة بسبب انقطاع اتصال SSL. "
