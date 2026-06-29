@@ -798,8 +798,16 @@ def fail_job(job_id: str, exc: Exception) -> None:
 def friendly_error(message: str) -> str:
     if "Requested format is not available" in message:
         return "تعذر العثور على صيغة قابلة للتحميل لهذا الرابط. حدّث yt-dlp أو جرّب رابطاً آخر."
+    if "فشل محرك عزل الصوت" in message:
+        if "AssertionError" in message or "pad1d" in message:
+            return "تعذر عزل الصوت لأن الملف قصير جداً أو صامت تقريباً. جرّب ملفاً أطول قليلاً أو مقطعاً واضح الصوت."
+        if "Killed" in message or "out of memory" in message.lower() or "cannot allocate memory" in message.lower():
+            return "موارد الاستضافة المجانية لم تكفِ لعزل هذا المقطع. جرّب مقطعاً أقصر أو انقل الخادم إلى VPS أقوى."
+        return "تعذر تشغيل محرك عزل الصوت على هذا الملف. جرّب ملفاً أقصر أو صيغة صوت/فيديو أخرى."
     if "HTTP Error 403" in message or "Forbidden" in message:
         return "منع YouTube تنزيل هذا الرابط مؤقتاً. أعد المحاولة، وإن تكرر الخطأ فقد يحتاج الرابط إلى كوكيز المتصفح أو طريقة تحميل مختلفة."
+    if "UNEXPECTED_EOF_WHILE_READING" in message or "SSL" in message:
+        return "تعذر تنزيل الرابط من YouTube بسبب انقطاع اتصال الاستضافة. جرّب مرة أخرى أو ارفع الملف من جهازك عبر تبويب ملف."
     if "Sign in to confirm" in message or "cookies" in message.lower():
         return "هذا الرابط يحتاج تسجيل دخول أو كوكيز من المتصفح قبل أن يستطيع الخادم تحميله."
     return message
