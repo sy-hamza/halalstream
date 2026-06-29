@@ -38,6 +38,14 @@ ASSETS_DIR = ROOT / "assets"
 MUSIC_RATIO_THRESHOLD = 0.13
 DEMUCS_MODEL = os.getenv("HALALSTREAM_DEMUCS_MODEL", "htdemucs")
 DEMUCS_JOBS = int(os.getenv("HALALSTREAM_DEMUCS_JOBS", "1"))
+YOUTUBE_CLIENT_FALLBACKS = (
+    ("android",),
+    ("ios",),
+    ("web",),
+    ("mweb",),
+    ("tv",),
+    ("web_safari",),
+)
 
 ASSETS_DIR.mkdir(exist_ok=True)
 STORAGE.mkdir(exist_ok=True)
@@ -355,20 +363,24 @@ def download_link(job_id: str, url: str) -> Path:
 
     workdir = job_dir(job_id)
     update_job(job_id, status="downloading", stage="تحميل المقطع", progress=8, message="نحمّل المقطع إلى خادم المعالجة.")
-    ydl_opts = {
-        "outtmpl": str(workdir / "source.%(ext)s"),
-        "format": "b[height<=720]/best[height<=720]/b/bv*[height<=720]+ba/best",
-        "merge_output_format": "mp4",
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": False,
-        "ffmpeg_location": str(Path(require_ffmpeg()).parent),
-        "extractor_args": {"youtube": {"player_client": ["android"]}},
-        "progress_hooks": [lambda data: yt_progress_hook(job_id, data)],
-    }
+    download_errors: list[str] = []
+    info: Optional[Dict[str, Any]] = None
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
+    for clients in youtube_download_clients(url):
+        cleanup_partial_downloads(workdir)
+        label = "، ".join(clients) if clients else "عام"
+        update_job(job_id, message=f"نحاول تنزيل الرابط عبر قناة آمنة: {label}.")
+        try:
+            with yt_dlp.YoutubeDL(build_ydl_options(workdir, job_id, clients)) as ydl:
+                info = ydl.extract_info(url, download=True)
+            break
+        except Exception as exc:
+            download_errors.append(f"{label}: {exc}")
+            update_job(job_id, message=f"تعذر التنزيل عبر {label}. نجرب قناة أخرى إن توفرت.")
+            time.sleep(1)
+
+    if info is None:
+        raise RuntimeError(youtube_download_error(download_errors))
 
     media_path = find_downloaded_media(workdir)
     if not media_path:
@@ -384,6 +396,58 @@ def download_link(job_id: str, url: str) -> Path:
         message="اكتمل التحميل. نستخرج المسار الصوتي الآن.",
     )
     return media_path
+
+
+def youtube_download_clients(url: str) -> tuple[tuple[str, ...], ...]:
+    lowered = url.lower()
+    if "youtube.com" in lowered or "youtu.be" in lowered:
+        return YOUTUBE_CLIENT_FALLBACKS
+    return ((),)
+
+
+def build_ydl_options(workdir: Path, job_id: str, youtube_clients: tuple[str, ...]) -> Dict[str, Any]:
+    ydl_opts: Dict[str, Any] = {
+        "outtmpl": str(workdir / "source.%(ext)s"),
+        "format": "b[height<=720]/best[height<=720]/b/bv*[height<=720]+ba/best",
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": False,
+        "retries": 5,
+        "fragment_retries": 5,
+        "extractor_retries": 4,
+        "socket_timeout": 30,
+        "continuedl": False,
+        "overwrites": True,
+        "source_address": "0.0.0.0",
+        "ffmpeg_location": str(Path(require_ffmpeg()).parent),
+        "progress_hooks": [lambda data: yt_progress_hook(job_id, data)],
+    }
+    if youtube_clients:
+        ydl_opts["extractor_args"] = {"youtube": {"player_client": list(youtube_clients)}}
+    return ydl_opts
+
+
+def cleanup_partial_downloads(workdir: Path) -> None:
+    for pattern in ("source.*.part", "source.*.ytdl", "source.*.temp", "source.*.tmp"):
+        for path in workdir.glob(pattern):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def youtube_download_error(errors: list[str]) -> str:
+    last_error = errors[-1] if errors else "لم يصل تفصيل من yt-dlp."
+    if "UNEXPECTED_EOF_WHILE_READING" in last_error or "SSL" in last_error:
+        return (
+            "تعذر تنزيل الرابط من YouTube داخل الاستضافة بسبب انقطاع اتصال SSL. "
+            "حدّثنا الخادم ليجرب عدة قنوات تلقائياً، لكن إن تكرر الخطأ فغالباً أن الاستضافة المجانية تقطع اتصال YouTube مؤقتاً. "
+            "جرّب مرة أخرى، أو ارفع الملف من جهازك عبر تبويب ملف."
+        )
+    if "HTTP Error 403" in last_error or "Forbidden" in last_error:
+        return "منع YouTube تنزيل هذا الرابط مؤقتاً من خادم الاستضافة. جرّب رابطاً آخر أو ارفع الملف من جهازك."
+    return "تعذر تنزيل الرابط بعد عدة محاولات. جرّب رابطاً آخر أو ارفع الملف من جهازك."
 
 
 def yt_progress_hook(job_id: str, data: Dict[str, Any]) -> None:
