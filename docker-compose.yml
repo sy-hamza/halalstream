@@ -1,0 +1,20 @@
+services:
+  halalstream:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      HALALSTREAM_STORAGE_DIR: /home/user/app/storage
+      HALALSTREAM_DEMUCS_JOBS: "1"
+      HALALSTREAM_YOUTUBE_RETRIES: "2"
+      HALALSTREAM_YOUTUBE_SOCKET_TIMEOUT: "20"
+      HALALSTREAM_ALLOW_LINK_DOWNLOADS: "true"
+      # Optional: export YouTube cookies from your browser when YouTube requires login.
+      # HALALSTREAM_YTDLP_COOKIES: /home/user/app/secrets/cookies.txt
+    volumes:
+      - halalstream-storage:/home/user/app/storage
+      - ./secrets:/home/user/app/secrets:ro
+
+volumes:
+  halalstream-storage:

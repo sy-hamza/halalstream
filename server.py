@@ -48,6 +48,7 @@ YOUTUBE_CLIENT_FALLBACKS = tuple(
 ) or (("android",),)
 YOUTUBE_SOCKET_TIMEOUT = int(os.getenv("HALALSTREAM_YOUTUBE_SOCKET_TIMEOUT", "12"))
 YOUTUBE_RETRIES = int(os.getenv("HALALSTREAM_YOUTUBE_RETRIES", "1"))
+YTDLP_COOKIES = os.getenv("HALALSTREAM_YTDLP_COOKIES", "").strip()
 
 ASSETS_DIR.mkdir(exist_ok=True)
 STORAGE.mkdir(exist_ok=True)
@@ -447,6 +448,10 @@ def build_ydl_options(workdir: Path, job_id: str, youtube_clients: tuple[str, ..
     }
     if youtube_clients:
         ydl_opts["extractor_args"] = {"youtube": {"player_client": list(youtube_clients)}}
+    if YTDLP_COOKIES:
+        cookie_path = Path(YTDLP_COOKIES)
+        if cookie_path.exists():
+            ydl_opts["cookiefile"] = str(cookie_path)
     return ydl_opts
 
 

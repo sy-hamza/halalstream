@@ -53,3 +53,4 @@ storage/jobs
 - روابط YouTube تتغير كثيراً. يستخدم الخادم عميل Android داخل `yt-dlp` لأنه نجح مع الروابط التي ترفض عميل الويب بخطأ 403.
 - يمكن تجربة تعدد أنوية محرك العزل من المتغير `HALALSTREAM_DEMUCS_JOBS`، لكنه مضبوط افتراضياً على `1` لأنه الأكثر ثباتاً على Windows.
 - للنشر أونلاين راجع `DEPLOYMENT.md`.
+- إذا كان لديك GitHub Student Developer Pack فراجع `STUDENT_HOSTING.md` لتشغيله على VPS مجاني/مدعوم.
