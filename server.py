@@ -34,15 +34,17 @@ ROOT = Path(__file__).resolve().parent
 STORAGE = Path(os.getenv("HALALSTREAM_STORAGE_DIR", ROOT / "storage")).resolve()
 JOBS_DIR = STORAGE / "jobs"
 TOOLS_DIR = ROOT / "tools"
+ASSETS_DIR = ROOT / "assets"
 MUSIC_RATIO_THRESHOLD = 0.13
 DEMUCS_MODEL = os.getenv("HALALSTREAM_DEMUCS_MODEL", "htdemucs")
 DEMUCS_JOBS = int(os.getenv("HALALSTREAM_DEMUCS_JOBS", "1"))
 
+ASSETS_DIR.mkdir(exist_ok=True)
 STORAGE.mkdir(exist_ok=True)
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="HalalStream Server", version="0.3.0")
-app.mount("/assets", StaticFiles(directory=ROOT / "assets"), name="assets")
+app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 
 jobs: Dict[str, Dict[str, Any]] = {}
 jobs_lock = threading.Lock()
