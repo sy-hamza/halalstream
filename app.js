@@ -457,7 +457,7 @@ function humanStage(job) {
 
 function humanMessage(job) {
   if (job.status === "downloading") {
-    return "نحمّل المقطع إلى خادم المعالجة. يمكنك ترك الصفحة مفتوحة والرجوع بعد قليل.";
+    return "نحمّل المقطع إلى خادم المعالجة. إن طال انتظار رابط YouTube على الاستضافة المجانية، فتبويب ملف أسرع وأثبت غالباً.";
   }
   if (job.status === "extracting") {
     return "نستخرج الصوت من المقطع حتى نبدأ فحص مسار المعازف.";
@@ -481,7 +481,7 @@ function humanMessage(job) {
 }
 
 function humanLog(job) {
-  if (job.status === "downloading") return "تحميل المقطع: يمكنك ترك المتصفح والرجوع، ما دام السيرفر يعمل.";
+  if (job.status === "downloading") return "تحميل المقطع: روابط YouTube قد تتأخر على الاستضافة المجانية؛ رفع الملف مباشرة يكون أسرع غالباً.";
   if (job.status === "extracting") return "استخراج الصوت: نجهز المسار الصوتي للفحص.";
   if (job.status === "separating") return `عزل الصوت: ${pickWaitingNote()}`;
   if (job.status === "analyzing") return "مراجعة النتيجة: نتحقق قبل السماح بالتحميل.";

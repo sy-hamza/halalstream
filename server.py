@@ -38,14 +38,13 @@ ASSETS_DIR = ROOT / "assets"
 MUSIC_RATIO_THRESHOLD = 0.13
 DEMUCS_MODEL = os.getenv("HALALSTREAM_DEMUCS_MODEL", "htdemucs")
 DEMUCS_JOBS = int(os.getenv("HALALSTREAM_DEMUCS_JOBS", "1"))
-YOUTUBE_CLIENT_FALLBACKS = (
-    ("android",),
-    ("ios",),
-    ("web",),
-    ("mweb",),
-    ("tv",),
-    ("web_safari",),
-)
+YOUTUBE_CLIENT_FALLBACKS = tuple(
+    (client.strip(),)
+    for client in os.getenv("HALALSTREAM_YOUTUBE_CLIENTS", "android,web,mweb").split(",")
+    if client.strip()
+) or (("android",),)
+YOUTUBE_SOCKET_TIMEOUT = int(os.getenv("HALALSTREAM_YOUTUBE_SOCKET_TIMEOUT", "12"))
+YOUTUBE_RETRIES = int(os.getenv("HALALSTREAM_YOUTUBE_RETRIES", "1"))
 
 ASSETS_DIR.mkdir(exist_ok=True)
 STORAGE.mkdir(exist_ok=True)
@@ -413,14 +412,23 @@ def build_ydl_options(workdir: Path, job_id: str, youtube_clients: tuple[str, ..
         "noplaylist": True,
         "quiet": True,
         "no_warnings": False,
-        "retries": 5,
-        "fragment_retries": 5,
-        "extractor_retries": 4,
-        "socket_timeout": 30,
+        "retries": YOUTUBE_RETRIES,
+        "fragment_retries": YOUTUBE_RETRIES,
+        "extractor_retries": YOUTUBE_RETRIES,
+        "socket_timeout": YOUTUBE_SOCKET_TIMEOUT,
         "continuedl": False,
         "overwrites": True,
+        "nopart": True,
+        "cachedir": False,
         "source_address": "0.0.0.0",
         "ffmpeg_location": str(Path(require_ffmpeg()).parent),
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0 Safari/537.36"
+            )
+        },
         "progress_hooks": [lambda data: yt_progress_hook(job_id, data)],
     }
     if youtube_clients:
