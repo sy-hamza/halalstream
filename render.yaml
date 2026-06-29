@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: halalstream
+    env: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    disk:
+      name: halalstream-storage
+      mountPath: /home/user/app/storage
+      sizeGB: 20
+    envVars:
+      - key: HALALSTREAM_STORAGE_DIR
+        value: /home/user/app/storage
+      - key: HALALSTREAM_DEMUCS_MODEL
+        value: htdemucs
+      - key: HALALSTREAM_DEMUCS_JOBS
+        value: "1"

@@ -1,0 +1,756 @@
+from __future__ import annotations
+
+import json
+import math
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import traceback
+import uuid
+import wave
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, HttpUrl
+
+try:
+    import imageio_ffmpeg
+except Exception:  # pragma: no cover - reported through /api/health
+    imageio_ffmpeg = None
+
+try:
+    import yt_dlp
+except Exception:  # pragma: no cover - reported through /api/health
+    yt_dlp = None
+
+
+ROOT = Path(__file__).resolve().parent
+STORAGE = Path(os.getenv("HALALSTREAM_STORAGE_DIR", ROOT / "storage")).resolve()
+JOBS_DIR = STORAGE / "jobs"
+TOOLS_DIR = ROOT / "tools"
+MUSIC_RATIO_THRESHOLD = 0.13
+DEMUCS_MODEL = os.getenv("HALALSTREAM_DEMUCS_MODEL", "htdemucs")
+DEMUCS_JOBS = int(os.getenv("HALALSTREAM_DEMUCS_JOBS", "1"))
+
+STORAGE.mkdir(exist_ok=True)
+JOBS_DIR.mkdir(parents=True, exist_ok=True)
+
+app = FastAPI(title="HalalStream Server", version="0.3.0")
+app.mount("/assets", StaticFiles(directory=ROOT / "assets"), name="assets")
+
+jobs: Dict[str, Dict[str, Any]] = {}
+jobs_lock = threading.Lock()
+
+
+class LinkJobRequest(BaseModel):
+    url: HttpUrl
+
+
+@app.get("/")
+def index() -> FileResponse:
+    return FileResponse(ROOT / "index.html")
+
+
+@app.get("/app.js")
+def app_js() -> FileResponse:
+    return FileResponse(ROOT / "app.js", media_type="application/javascript")
+
+
+@app.get("/styles.css")
+def styles() -> FileResponse:
+    return FileResponse(ROOT / "styles.css", media_type="text/css")
+
+
+@app.get("/api/health")
+def health() -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "python": sys.version.split()[0],
+        "ffmpeg": bool(get_ffmpeg_path()),
+        "yt_dlp": yt_dlp is not None,
+        "demucs": has_module("demucs"),
+        "demucs_model": DEMUCS_MODEL,
+        "demucs_jobs": DEMUCS_JOBS,
+        "message": "الخادم يعمل. اكتمال المعالجة يحتاج yt-dlp و ffmpeg و demucs.",
+    }
+
+
+@app.post("/api/jobs/link")
+def create_link_job(payload: LinkJobRequest) -> Dict[str, str]:
+    job = create_job("link", source_url=str(payload.url))
+    start_worker(process_job, job["id"])
+    return {"id": job["id"]}
+
+
+@app.post("/api/jobs/upload")
+async def create_upload_job(file: UploadFile = File(...)) -> Dict[str, str]:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="لم يصل اسم الملف إلى الخادم.")
+
+    job = create_job("upload", source_name=file.filename)
+    workdir = job_dir(job["id"])
+    suffix = safe_suffix(file.filename)
+    original_path = workdir / f"uploaded{suffix}"
+
+    with original_path.open("wb") as target:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            target.write(chunk)
+
+    update_job(job["id"], original_path=str(original_path), title=file.filename)
+    start_worker(process_job, job["id"])
+    return {"id": job["id"]}
+
+
+@app.get("/api/jobs/latest")
+def latest_job() -> Dict[str, Any]:
+    with jobs_lock:
+        latest = max(jobs.values(), key=lambda item: item.get("updated_at", 0), default=None)
+    if not latest:
+        raise HTTPException(status_code=404, detail="لا توجد مهام محفوظة بعد.")
+    job = public_job(latest["id"])
+    if not job:
+        raise HTTPException(status_code=404, detail="لا توجد مهام محفوظة بعد.")
+    return job
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str) -> Dict[str, Any]:
+    job = public_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="لم يتم العثور على المهمة.")
+    return job
+
+
+@app.post("/api/jobs/{job_id}/purify")
+def purify(job_id: str) -> Dict[str, str]:
+    job = get_internal_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="لم يتم العثور على المهمة.")
+    if job["status"] not in {"needs_consent", "failed_after_detection"}:
+        raise HTTPException(status_code=409, detail="لا يمكن بدء إزالة المعازف في الحالة الحالية.")
+
+    update_job(job_id, status="purifying", stage="إزالة المعازف", progress=82, message="تمت الموافقة. نجهز نسخة منقّاة الآن.")
+    start_worker(purify_job, job_id)
+    return {"id": job_id}
+
+
+@app.post("/api/jobs/{job_id}/retry")
+def retry(job_id: str) -> Dict[str, str]:
+    job = get_internal_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="لم يتم العثور على المهمة.")
+    if job["status"] != "failed":
+        raise HTTPException(status_code=409, detail="إعادة المحاولة متاحة فقط بعد فشل المعالجة.")
+
+    clear_generated_outputs(job_id)
+    update_job(
+        job_id,
+        status="queued",
+        stage="إعادة المحاولة",
+        progress=3,
+        message="نعيد المعالجة من الملف الموجود لتوفير وقت التحميل.",
+        has_music=None,
+        instrumental_ratio=None,
+        confidence=None,
+        audio_path=None,
+        vocals_path=None,
+        instrumental_path=None,
+        purified_path=None,
+        purified_audio_path=None,
+        clean_audio_path=None,
+        error=None,
+    )
+    start_worker(process_job, job_id)
+    return {"id": job_id}
+
+
+@app.get("/api/jobs/{job_id}/download")
+def download(job_id: str, kind: str = "purified") -> FileResponse:
+    job = get_internal_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="لم يتم العثور على المهمة.")
+
+    if kind == "original":
+        if job["status"] != "clean":
+            raise HTTPException(status_code=403, detail="لا يسمح بتحميل الملف الأصلي إلا بعد ثبوت خلوه من المعازف.")
+        path = job.get("original_path")
+        filename = f"halalstream-clean-{job_id}{Path(path).suffix if path else '.mp4'}"
+    elif kind == "clean_audio":
+        if job["status"] != "clean":
+            raise HTTPException(status_code=403, detail="الصوت النظيف غير متاح إلا بعد ثبوت خلو المقطع من المعازف.")
+        path = job.get("clean_audio_path")
+        filename = f"halalstream-clean-audio-{job_id}{Path(path).suffix if path else '.m4a'}"
+    elif kind == "purified_audio":
+        if job["status"] != "complete":
+            raise HTTPException(status_code=403, detail="الصوت المنقّى غير جاهز بعد.")
+        path = job.get("purified_audio_path")
+        filename = f"halalstream-purified-audio-{job_id}{Path(path).suffix if path else '.m4a'}"
+    else:
+        if job["status"] != "complete":
+            raise HTTPException(status_code=403, detail="الملف المنقّى غير جاهز بعد.")
+        path = job.get("purified_path")
+        filename = f"halalstream-purified-{job_id}{Path(path).suffix if path else '.mp4'}"
+
+    if not path or not Path(path).exists():
+        raise HTTPException(status_code=404, detail="ملف التحميل غير موجود على القرص.")
+    return FileResponse(path, filename=filename)
+
+
+def create_job(source_type: str, source_url: Optional[str] = None, source_name: Optional[str] = None) -> Dict[str, Any]:
+    job_id = uuid.uuid4().hex[:12]
+    workdir = job_dir(job_id)
+    workdir.mkdir(parents=True, exist_ok=True)
+    job = {
+        "id": job_id,
+        "status": "queued",
+        "stage": "في قائمة الانتظار",
+        "message": "استلمنا الطلب، وسيبدأ خادم المعالجة الآن.",
+        "progress": 2,
+        "source_type": source_type,
+        "source_url": source_url,
+        "source_name": source_name,
+        "title": source_name or "مقطع من رابط",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "has_music": None,
+        "instrumental_ratio": None,
+        "confidence": None,
+        "original_path": None,
+        "audio_path": None,
+        "vocals_path": None,
+        "instrumental_path": None,
+        "purified_path": None,
+        "purified_audio_path": None,
+        "clean_audio_path": None,
+        "error": None,
+    }
+    with jobs_lock:
+        jobs[job_id] = job
+    persist_job(job_id)
+    return job
+
+
+def process_job(job_id: str) -> None:
+    try:
+        ensure_runtime()
+        job = get_internal_job(job_id)
+        if not job:
+            return
+
+        if job["source_type"] == "link":
+            existing_original = job.get("original_path")
+            if existing_original and Path(existing_original).exists():
+                original = Path(existing_original)
+                update_job(job_id, status="extracting", stage="استخراج الصوت", progress=24, message="نستخدم الملف الموجود ونستخرج الصوت من جديد.")
+            else:
+                original = download_link(job_id, job["source_url"])
+        else:
+            original = Path(job["original_path"])
+            update_job(job_id, status="extracting", stage="استخراج الصوت", progress=24, message="نجهز الملف للتحليل.")
+
+        audio = extract_audio(job_id, original)
+        vocals, instrumental = separate_vocals(job_id, audio)
+        ratio, confidence = estimate_music_ratio(audio, vocals, instrumental)
+        has_music = ratio >= MUSIC_RATIO_THRESHOLD
+
+        if has_music:
+            update_job(
+                job_id,
+                status="needs_consent",
+                stage="الحكم الشرعي قبل التحميل",
+                progress=78,
+                message="تم رصد مسار معازف. أوقفنا التحميل حتى توافق على إزالته.",
+                has_music=True,
+                instrumental_ratio=round(ratio, 4),
+                confidence=round(confidence, 4),
+                vocals_path=str(vocals),
+                instrumental_path=str(instrumental),
+            )
+            return
+
+        clean_audio = encode_audio(job_id, audio, "clean-audio.m4a", 92, "نجهز نسخة صوتية نظيفة للتحميل.")
+        update_job(
+            job_id,
+            status="clean",
+            stage="جاهز للتحميل",
+            progress=100,
+            message="الحمد لله، لم يظهر مؤشر معتبر للمعازف. يمكنك تحميل المقطع أو الصوت فقط.",
+            has_music=False,
+            instrumental_ratio=round(ratio, 4),
+            confidence=round(confidence, 4),
+            vocals_path=str(vocals),
+            instrumental_path=str(instrumental),
+            clean_audio_path=str(clean_audio),
+        )
+    except Exception as exc:
+        fail_job(job_id, exc)
+
+
+def purify_job(job_id: str) -> None:
+    try:
+        job = get_internal_job(job_id)
+        if not job:
+            return
+        original = Path(job["original_path"])
+        if not job.get("vocals_path"):
+            raise RuntimeError("لم نجد مسار الصوت البشري الناتج من نموذج العزل.")
+        vocals = Path(job["vocals_path"])
+        if not vocals.exists():
+            raise RuntimeError("لم نجد مسار الصوت البشري الناتج من نموذج العزل.")
+
+        ffmpeg = require_ffmpeg()
+        audio_out = encode_audio(job_id, vocals, "purified-audio.m4a", 86, "نجهز نسخة صوتية منقّاة وسريعة التحميل.")
+        out = job_dir(job_id) / "purified.mp4"
+        update_job(job_id, progress=92, message="نركّب الصوت المنقّى على المقطع دون إعادة ضغط الفيديو.")
+        run_cmd(
+            [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(original),
+                "-i",
+                str(audio_out),
+                "-map",
+                "0:v:0?",
+                "-map",
+                "1:a:0",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "copy",
+                "-shortest",
+                "-movflags",
+                "+faststart",
+                str(out),
+            ],
+            "فشل تركيب الصوت المنقّى على الفيديو.",
+        )
+        update_job(
+            job_id,
+            status="complete",
+            stage="تمت إزالة المعازف",
+            progress=100,
+            message="تم بحمد الله عزل مسار المعازف وإعداد نسخة منقّاة قدر الإمكان. الملف جاهز للتحميل.",
+            purified_path=str(out),
+            purified_audio_path=str(audio_out),
+        )
+    except Exception as exc:
+        fail_job(job_id, exc)
+
+
+def download_link(job_id: str, url: str) -> Path:
+    if yt_dlp is None:
+        raise RuntimeError("مكتبة yt-dlp غير مثبتة داخل بيئة المشروع.")
+
+    workdir = job_dir(job_id)
+    update_job(job_id, status="downloading", stage="تحميل المقطع", progress=8, message="نحمّل المقطع إلى خادم المعالجة.")
+    ydl_opts = {
+        "outtmpl": str(workdir / "source.%(ext)s"),
+        "format": "b[height<=720]/best[height<=720]/b/bv*[height<=720]+ba/best",
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": False,
+        "ffmpeg_location": str(Path(require_ffmpeg()).parent),
+        "extractor_args": {"youtube": {"player_client": ["android"]}},
+        "progress_hooks": [lambda data: yt_progress_hook(job_id, data)],
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+
+    media_path = find_downloaded_media(workdir)
+    if not media_path:
+        raise RuntimeError("اكتمل التحميل لكن لم نستطع تحديد ملف الوسائط الناتج.")
+
+    update_job(
+        job_id,
+        original_path=str(media_path),
+        title=info.get("title") or "مقطع من رابط",
+        status="extracting",
+        stage="استخراج الصوت",
+        progress=24,
+        message="اكتمل التحميل. نستخرج المسار الصوتي الآن.",
+    )
+    return media_path
+
+
+def yt_progress_hook(job_id: str, data: Dict[str, Any]) -> None:
+    if data.get("status") != "downloading":
+        return
+    total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
+    downloaded = data.get("downloaded_bytes") or 0
+    if total:
+        progress = 8 + min(14, int((downloaded / total) * 14))
+        update_job(job_id, progress=progress, message=f"جار التحميل: {progress}% من مرحلة التحميل.")
+
+
+def extract_audio(job_id: str, original: Path) -> Path:
+    ffmpeg = require_ffmpeg()
+    audio = job_dir(job_id) / "analysis.wav"
+    update_job(job_id, status="extracting", stage="استخراج الصوت", progress=30, message="نحوّل الصوت إلى صيغة مناسبة للتحليل.")
+    run_cmd(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(original),
+            "-vn",
+            "-ac",
+            "2",
+            "-ar",
+            "44100",
+            "-sample_fmt",
+            "s16",
+            str(audio),
+        ],
+        "فشل استخراج الصوت من المقطع.",
+    )
+    if not audio.exists() or audio.stat().st_size == 0:
+        raise RuntimeError("فشل استخراج الصوت: لم ينتج ffmpeg ملف التحليل الصوتي.")
+    update_job(job_id, audio_path=str(audio))
+    return audio
+
+
+def separate_vocals(job_id: str, audio: Path) -> tuple[Path, Path]:
+    if not has_module("demucs"):
+        raise RuntimeError("مكتبة demucs غير مثبتة. ثبّت المتطلبات ثم أعد تشغيل السيرفر.")
+    if not audio.exists() or audio.stat().st_size == 0:
+        raise RuntimeError("ملف الصوت المطلوب للعزل غير موجود. أعد المحاولة بعد إعادة تشغيل الخادم.")
+
+    out_dir = job_dir(job_id) / "separated"
+    update_job(job_id, status="separating", stage="عزل الصوت", progress=42, message="نعزل الصوت البشري عن مسار المعازف. يمكنك ترك الصفحة والرجوع لاحقاً.")
+    run_cmd(
+        [
+            sys.executable,
+            "-m",
+            "demucs.separate",
+            "--two-stems",
+            "vocals",
+            "-n",
+            DEMUCS_MODEL,
+            "-j",
+            str(max(1, DEMUCS_JOBS)),
+            "-o",
+            str(out_dir),
+            str(audio),
+        ],
+        "فشل محرك عزل الصوت.",
+    )
+
+    vocals, instrumental = find_demucs_stems(out_dir, audio.stem)
+    if not vocals.exists() or not instrumental.exists():
+        raise RuntimeError("انتهى محرك العزل لكن ملفات الصوت المتوقعة غير موجودة.")
+
+    update_job(job_id, status="analyzing", stage="تحليل النتيجة", progress=68, message="نقيس أثر الطبقة غير الصوتية قبل إصدار الحكم.")
+    return vocals, instrumental
+
+
+def find_demucs_stems(out_dir: Path, stem_name: str) -> tuple[Path, Path]:
+    expected_root = out_dir / DEMUCS_MODEL / stem_name
+    vocals = expected_root / "vocals.wav"
+    instrumental = expected_root / "no_vocals.wav"
+    if vocals.exists() and instrumental.exists():
+        return vocals, instrumental
+
+    vocals_matches = list(out_dir.glob(f"**/{stem_name}/vocals.wav")) + list(out_dir.glob("**/vocals.wav"))
+    instrumental_matches = list(out_dir.glob(f"**/{stem_name}/no_vocals.wav")) + list(out_dir.glob("**/no_vocals.wav"))
+    if vocals_matches and instrumental_matches:
+        return vocals_matches[0], instrumental_matches[0]
+
+    return vocals, instrumental
+
+
+def encode_audio(job_id: str, source_audio: Path, filename: str, progress: int, message: str) -> Path:
+    ffmpeg = require_ffmpeg()
+    out = job_dir(job_id) / filename
+    update_job(job_id, progress=progress, message=message)
+    run_cmd(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(source_audio),
+            "-vn",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            str(out),
+        ],
+        "فشل تجهيز ملف الصوت.",
+    )
+    if not out.exists() or out.stat().st_size == 0:
+        raise RuntimeError("فشل تجهيز ملف الصوت: لم ينتج ffmpeg ملفاً صالحاً.")
+    return out
+
+
+def estimate_music_ratio(audio: Path, vocals: Path, instrumental: Path) -> tuple[float, float]:
+    total = rms_wav(audio)
+    vocal_rms = rms_wav(vocals)
+    instrumental_rms = rms_wav(instrumental)
+    denominator = max(vocal_rms + instrumental_rms, total, 1.0)
+    ratio = instrumental_rms / denominator
+    confidence = min(0.98, 0.55 + abs(ratio - MUSIC_RATIO_THRESHOLD) * 2.5)
+    return ratio, confidence
+
+
+def rms_wav(path: Path) -> float:
+    import audioop
+
+    with wave.open(str(path), "rb") as wav:
+        width = wav.getsampwidth()
+        frames = wav.getnframes()
+        if frames == 0:
+            return 0.0
+        chunk_size = 44100 * 6
+        total_square = 0.0
+        total_samples = 0
+        while True:
+            data = wav.readframes(chunk_size)
+            if not data:
+                break
+            rms = audioop.rms(data, width)
+            samples = len(data) / max(width, 1)
+            total_square += (rms * rms) * samples
+            total_samples += samples
+    if not total_samples:
+        return 0.0
+    return math.sqrt(total_square / total_samples)
+
+
+def ensure_runtime() -> None:
+    missing = []
+    if yt_dlp is None:
+        missing.append("yt-dlp")
+    if not get_ffmpeg_path():
+        missing.append("ffmpeg")
+    if not has_module("demucs"):
+        missing.append("demucs")
+    if missing:
+        raise RuntimeError("تنقص بيئة المعالجة: " + "، ".join(missing))
+
+
+def get_ffmpeg_path() -> Optional[str]:
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg and is_usable_ffmpeg(Path(system_ffmpeg)):
+        return system_ffmpeg
+    if imageio_ffmpeg is None:
+        return None
+    try:
+        source = Path(imageio_ffmpeg.get_ffmpeg_exe())
+        target_dir = TOOLS_DIR / "ffmpeg"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / "ffmpeg.exe"
+        if not target.exists() or target.stat().st_size != source.stat().st_size:
+            shutil.copy2(source, target)
+        return str(target)
+    except Exception:
+        return None
+
+
+def is_usable_ffmpeg(path: Path) -> bool:
+    try:
+        if not path.exists() or path.stat().st_size < 1_000_000:
+            return False
+        result = subprocess.run([str(path), "-version"], capture_output=True, text=True, timeout=5)
+        return result.returncode == 0 and "ffmpeg" in (result.stdout + result.stderr).lower()
+    except Exception:
+        return False
+
+
+def require_ffmpeg() -> str:
+    ffmpeg = get_ffmpeg_path()
+    if not ffmpeg:
+        raise RuntimeError("لم نجد ffmpeg. ثبّت المتطلبات أو أضف ffmpeg إلى PATH.")
+    return ffmpeg
+
+
+def has_module(name: str) -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec(name) is not None
+
+
+def run_cmd(args: list[str], error_message: str) -> None:
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    ffmpeg = get_ffmpeg_path()
+    if ffmpeg:
+        path_key = "Path" if "Path" in env else "PATH"
+        env[path_key] = str(Path(ffmpeg).parent) + os.pathsep + env.get(path_key, "")
+        env["PATH"] = env[path_key]
+    result = subprocess.run(args, capture_output=True, text=True, env=env)
+    if result.returncode != 0:
+        details = "\n".join(part for part in [result.stdout.strip(), result.stderr.strip()] if part)
+        if len(details) > 2000:
+            details = details[-2000:]
+        raise RuntimeError(f"{error_message}\n{details}")
+
+
+def find_downloaded_media(workdir: Path) -> Optional[Path]:
+    ignored_suffixes = {".part", ".ytdl", ".json", ".wav", ".txt"}
+    candidates = [
+        path
+        for path in workdir.iterdir()
+        if path.is_file() and path.suffix.lower() not in ignored_suffixes and not path.name.startswith(".")
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item.stat().st_mtime)
+
+
+def safe_suffix(filename: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    if not suffix or len(suffix) > 12:
+        return ".bin"
+    return suffix
+
+
+def start_worker(target, job_id: str) -> None:
+    thread = threading.Thread(target=target, args=(job_id,), daemon=True)
+    thread.start()
+
+
+def clear_generated_outputs(job_id: str) -> None:
+    workdir = job_dir(job_id)
+    for relative in [
+        "analysis.wav",
+        "clean-audio.m4a",
+        "purified-audio.m4a",
+        "purified.mp4",
+        "separated",
+    ]:
+        path = workdir / relative
+        if path.exists():
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+
+
+def job_dir(job_id: str) -> Path:
+    return JOBS_DIR / job_id
+
+
+def get_internal_job(job_id: str) -> Optional[Dict[str, Any]]:
+    with jobs_lock:
+        job = jobs.get(job_id)
+        return dict(job) if job else None
+
+
+def update_job(job_id: str, **updates: Any) -> None:
+    with jobs_lock:
+        if job_id not in jobs:
+            return
+        jobs[job_id].update(updates)
+        jobs[job_id]["updated_at"] = time.time()
+    persist_job(job_id)
+
+
+def public_job(job_id: str) -> Optional[Dict[str, Any]]:
+    job = get_internal_job(job_id)
+    if not job:
+        return None
+    public = {
+        key: value
+        for key, value in job.items()
+        if key
+        not in {
+            "instrumental_ratio",
+            "confidence",
+            "original_path",
+            "audio_path",
+            "vocals_path",
+            "instrumental_path",
+            "purified_path",
+            "purified_audio_path",
+            "clean_audio_path",
+        }
+    }
+    public["can_download_original"] = job["status"] == "clean"
+    public["can_purify"] = job["status"] == "needs_consent"
+    public["can_download_purified"] = job["status"] == "complete"
+    if public["can_download_original"]:
+        public["download_url"] = f"/api/jobs/{job_id}/download?kind=original"
+        public["download_urls"] = {
+            "video": f"/api/jobs/{job_id}/download?kind=original",
+            "audio": f"/api/jobs/{job_id}/download?kind=clean_audio" if job.get("clean_audio_path") else None,
+        }
+    elif public["can_download_purified"]:
+        public["download_url"] = f"/api/jobs/{job_id}/download?kind=purified"
+        public["download_urls"] = {
+            "video": f"/api/jobs/{job_id}/download?kind=purified",
+            "audio": f"/api/jobs/{job_id}/download?kind=purified_audio" if job.get("purified_audio_path") else None,
+        }
+    else:
+        public["download_url"] = None
+        public["download_urls"] = {"video": None, "audio": None}
+    return public
+
+
+def persist_job(job_id: str) -> None:
+    job = get_internal_job(job_id)
+    if not job:
+        return
+    path = job_dir(job_id) / "job.json"
+    path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def fail_job(job_id: str, exc: Exception) -> None:
+    trace = traceback.format_exc()
+    message = friendly_error(str(exc))
+    update_job(
+        job_id,
+        status="failed",
+        stage="تعذر إكمال المعالجة",
+        progress=0,
+        message=message,
+        error=trace,
+    )
+
+
+def friendly_error(message: str) -> str:
+    if "Requested format is not available" in message:
+        return "تعذر العثور على صيغة قابلة للتحميل لهذا الرابط. حدّث yt-dlp أو جرّب رابطاً آخر."
+    if "HTTP Error 403" in message or "Forbidden" in message:
+        return "منع YouTube تنزيل هذا الرابط مؤقتاً. أعد المحاولة، وإن تكرر الخطأ فقد يحتاج الرابط إلى كوكيز المتصفح أو طريقة تحميل مختلفة."
+    if "Sign in to confirm" in message or "cookies" in message.lower():
+        return "هذا الرابط يحتاج تسجيل دخول أو كوكيز من المتصفح قبل أن يستطيع الخادم تحميله."
+    return message
+
+
+def load_persisted_jobs() -> None:
+    active_statuses = {"queued", "downloading", "extracting", "separating", "analyzing", "purifying"}
+    for path in JOBS_DIR.glob("*/job.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not data.get("id"):
+                continue
+            data.setdefault("purified_audio_path", None)
+            data.setdefault("clean_audio_path", None)
+            if data.get("status") in active_statuses:
+                data["status"] = "failed"
+                data["stage"] = "توقفت المعالجة"
+                data["progress"] = 0
+                data["message"] = "توقف الخادم أثناء العمل. اضغط إعادة المحاولة ليكمل من الملف المحفوظ إن كان موجوداً."
+                data["error"] = "Server restarted while job was active."
+                path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            with jobs_lock:
+                jobs[data["id"]] = data
+        except Exception:
+            continue
+
+
+load_persisted_jobs()

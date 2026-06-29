@@ -1,0 +1,8 @@
+.venv/
+.agents/
+assets/*.png
+storage/
+tools/ffmpeg/
+__pycache__/
+*.pyc
+*.log
