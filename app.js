@@ -1,6 +1,6 @@
 const API_BASE = window.location.hostname.includes("hf.space") 
   ? "" 
-  : "https://syhamza-halalstream.hf.space";
+  : "https://7haydar-halalstream.hf.space";
 
 const tabs = Array.from(document.querySelectorAll(".mode-tab"));
 const panes = Array.from(document.querySelectorAll(".mode-pane"));
@@ -311,7 +311,7 @@ async function checkHealth() {
     serverPill.classList.add("is-error");
     serverPill.classList.remove("is-ready");
     serverText.textContent = "الخادم غير متصل";
-    const wakeUpUrl = "https://syhamza-halalstream.hf.space";
+    const wakeUpUrl = "https://7haydar-halalstream.hf.space";
     updateStatus(
       "السيرفر نائم حالياً 😴",
       `السيرفر مطفأ تلقائياً لتوفير التكلفة أثناء عدم الاستخدام. <a href="${wakeUpUrl}" target="_blank" style="color: #b68134; font-weight: bold; text-decoration: underline; display: inline-block; margin-top: 4px;">انقر هنا لفتح السيرفر وإيقاظه في نافذة جديدة</a>، ثم انتظر 30 ثانية وأعد تحديث هذه الصفحة.`,
