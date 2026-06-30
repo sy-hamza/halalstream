@@ -541,6 +541,11 @@ def download_via_cobalt(job_id: str, url: str, workdir: Path) -> Path:
 
 
 def download_link(job_id: str, url: str) -> Path:
+    # Clean tracking query parameters for safer downloading, especially for Instagram/TikTok/Shorts
+    if "instagram.com" in url.lower() or "tiktok.com" in url.lower() or "/shorts/" in url.lower() or "youtu.be" in url.lower():
+        if "?" in url:
+            url = url.split("?")[0]
+            
     workdir = job_dir(job_id)
     update_job(job_id, status="downloading", stage="تحميل المقطع", progress=8, message="نحمّل المقطع إلى خادم المعالجة.")
     download_errors: list[str] = []
