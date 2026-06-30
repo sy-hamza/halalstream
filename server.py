@@ -38,6 +38,8 @@ ASSETS_DIR = ROOT / "assets"
 MUSIC_RATIO_THRESHOLD = 0.13
 DEMUCS_MODEL = os.getenv("HALALSTREAM_DEMUCS_MODEL", "htdemucs")
 DEMUCS_JOBS = int(os.getenv("HALALSTREAM_DEMUCS_JOBS", "1"))
+DEMUCS_SEGMENT = float(os.getenv("HALALSTREAM_DEMUCS_SEGMENT", "3"))
+DEMUCS_OVERLAP = float(os.getenv("HALALSTREAM_DEMUCS_OVERLAP", "0.1"))
 HOSTED_SPACE = bool(os.getenv("SPACE_ID") or os.getenv("SPACE_HOST"))
 ALLOW_LINK_DOWNLOADS = os.getenv("HALALSTREAM_ALLOW_LINK_DOWNLOADS", "").strip().lower() in {"1", "true", "yes"}
 LINK_DOWNLOADS_RELIABLE = (not HOSTED_SPACE) or ALLOW_LINK_DOWNLOADS
@@ -99,6 +101,8 @@ def health() -> Dict[str, Any]:
         "demucs": has_module("demucs"),
         "demucs_model": DEMUCS_MODEL,
         "demucs_jobs": DEMUCS_JOBS,
+        "demucs_segment": DEMUCS_SEGMENT,
+        "demucs_overlap": DEMUCS_OVERLAP,
         "hosted_space": HOSTED_SPACE,
         "link_downloads_reliable": LINK_DOWNLOADS_RELIABLE,
         "youtube_pot_provider": bool(YOUTUBE_POT_BASE_URL),
@@ -549,23 +553,25 @@ def separate_vocals(job_id: str, audio: Path) -> tuple[Path, Path]:
 
     out_dir = job_dir(job_id) / "separated"
     update_job(job_id, status="separating", stage="عزل الصوت", progress=42, message="نعزل الصوت البشري عن مسار المعازف. يمكنك ترك الصفحة والرجوع لاحقاً.")
-    run_cmd(
-        [
-            sys.executable,
-            "-m",
-            "demucs.separate",
-            "--two-stems",
-            "vocals",
-            "-n",
-            DEMUCS_MODEL,
-            "-j",
-            str(max(1, DEMUCS_JOBS)),
-            "-o",
-            str(out_dir),
-            str(audio),
-        ],
-        "فشل محرك عزل الصوت.",
-    )
+    command = [
+        sys.executable,
+        "-m",
+        "demucs.separate",
+        "--two-stems",
+        "vocals",
+        "-n",
+        DEMUCS_MODEL,
+        "-j",
+        str(max(1, DEMUCS_JOBS)),
+        "--overlap",
+        str(max(0.0, DEMUCS_OVERLAP)),
+        "-o",
+        str(out_dir),
+        str(audio),
+    ]
+    if DEMUCS_SEGMENT > 0:
+        command.extend(["--segment", str(DEMUCS_SEGMENT)])
+    run_cmd(command, "فشل محرك عزل الصوت.")
 
     vocals, instrumental = find_demucs_stems(out_dir, audio.stem)
     if not vocals.exists() or not instrumental.exists():
