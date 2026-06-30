@@ -38,7 +38,7 @@ ASSETS_DIR = ROOT / "assets"
 MUSIC_RATIO_THRESHOLD = 0.13
 DEMUCS_MODEL = os.getenv("HALALSTREAM_DEMUCS_MODEL", "htdemucs")
 DEMUCS_JOBS = int(os.getenv("HALALSTREAM_DEMUCS_JOBS", "1"))
-DEMUCS_SEGMENT = float(os.getenv("HALALSTREAM_DEMUCS_SEGMENT", "3"))
+DEMUCS_SEGMENT = int(float(os.getenv("HALALSTREAM_DEMUCS_SEGMENT", "3")))
 DEMUCS_OVERLAP = float(os.getenv("HALALSTREAM_DEMUCS_OVERLAP", "0.1"))
 HOSTED_SPACE = bool(os.getenv("SPACE_ID") or os.getenv("SPACE_HOST"))
 ALLOW_LINK_DOWNLOADS = os.getenv("HALALSTREAM_ALLOW_LINK_DOWNLOADS", "").strip().lower() in {"1", "true", "yes"}
@@ -570,7 +570,7 @@ def separate_vocals(job_id: str, audio: Path) -> tuple[Path, Path]:
         str(audio),
     ]
     if DEMUCS_SEGMENT > 0:
-        command.extend(["--segment", str(DEMUCS_SEGMENT)])
+        command.extend(["--segment", str(int(DEMUCS_SEGMENT))])
     run_cmd(command, "فشل محرك عزل الصوت.")
 
     vocals, instrumental = find_demucs_stems(out_dir, audio.stem)
