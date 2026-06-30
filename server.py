@@ -764,7 +764,7 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
     ])
     if DEMUCS_SEGMENT > 0:
         command.extend(["--segment", str(int(DEMUCS_SEGMENT))])
-    run_cmd(command, "فشل محرك عزل الصوت.")
+    run_cmd(command, "فشل محرك عزل الصوت.", job_id=job_id)
 
     vocals, instrumental = find_demucs_stems(out_dir, audio.stem)
     if not vocals.exists() or not instrumental.exists():
@@ -912,7 +912,7 @@ def has_module(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
 
-def run_cmd(args: list[str], error_message: str) -> None:
+def run_cmd(args: list[str], error_message: str, job_id: Optional[str] = None) -> None:
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     ffmpeg = get_ffmpeg_path()
@@ -921,6 +921,18 @@ def run_cmd(args: list[str], error_message: str) -> None:
         env[path_key] = str(Path(ffmpeg).parent) + os.pathsep + env.get(path_key, "")
         env["PATH"] = env[path_key]
     result = subprocess.run(args, capture_output=True, text=True, env=env)
+    
+    if job_id:
+        log_path = job_dir(job_id) / "cmd_log.txt"
+        try:
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(f"\n--- COMMAND: {' '.join(args)} ---\n")
+                f.write(f"RETURN CODE: {result.returncode}\n")
+                f.write(f"STDOUT:\n{result.stdout}\n")
+                f.write(f"STDERR:\n{result.stderr}\n")
+        except Exception as e:
+            print("Failed to save log:", e)
+
     if result.returncode != 0:
         details = "\n".join(part for part in [result.stdout.strip(), result.stderr.strip()] if part)
         if len(details) > 2000:
