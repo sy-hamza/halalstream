@@ -400,13 +400,30 @@ function renderJob(job) {
 
   if (job.status === "needs_consent") {
     showDecisionOverlay();
+    const ratioPct = Math.round((job.instrumental_ratio || 0) * 100);
+    const warningRatioEl = document.querySelector("#warning-ratio");
+    if (warningRatioEl) {
+      warningRatioEl.textContent = `نسبة الموسيقى/المعازف المرصودة: ${ratioPct}%`;
+      warningRatioEl.hidden = false;
+    }
     warningCard.hidden = false;
+    
+    // Auto-scroll to the warning card so the user notices the action on mobile
+    window.setTimeout(() => {
+      warningCard.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 150);
     return;
   }
 
   if (job.status === "complete") {
     setDownloadLink(purifiedVideoDownload, job.download_urls?.video || job.download_url);
     setDownloadLink(purifiedAudioDownload, job.download_urls?.audio);
+    const ratioPct = Math.round((job.instrumental_ratio || 0) * 100);
+    const completeRatioEl = document.querySelector("#complete-ratio");
+    if (completeRatioEl) {
+      completeRatioEl.textContent = `نسبة المعازف قبل التنقية: ${ratioPct}% | بعد التنقية: 0% (منقّى بالكامل)`;
+      completeRatioEl.hidden = false;
+    }
     completeCard.hidden = false;
     return;
   }
@@ -462,14 +479,13 @@ function hideResultCards() {
 }
 
 function showDecisionOverlay() {
-  decisionOverlay.hidden = false;
-  document.body.classList.add("has-decision-overlay");
-  window.setTimeout(() => decisionPurifyButton.focus({ preventScroll: true }), 80);
+  // Disabled full-screen popup to prevent layout/scrolling issues on mobile.
+  // The warning card is displayed directly inside the page instead.
+  decisionOverlay.hidden = true;
 }
 
 function hideDecisionOverlay() {
   decisionOverlay.hidden = true;
-  document.body.classList.remove("has-decision-overlay");
 }
 
 function setDownloadLink(anchor, url) {
@@ -526,7 +542,7 @@ function humanMessage(job) {
     return `${pickWaitingNote()} هذه المرحلة قد تأخذ عدة دقائق حسب طول المقطع وقوة الجهاز.`;
   }
   if (job.status === "needs_consent") {
-    return "تم رصد مسار معازف؛ أوقفنا التحميل حتى تختار إزالة المعازف.";
+    return "⚠️ تم رصد مسار معازف! أوقفنا التحميل. يرجى النزول لأسفل لوحة المعالجة والموافقة لإكمال عملية التطهير.";
   }
   if (job.status === "purifying") {
     return `${pickWaitingNote()} نجهز النسخة المنقّاة الآن.`;

@@ -4,11 +4,13 @@ import json
 import math
 import os
 import shutil
+import ssl
 import subprocess
 import sys
 import threading
 import time
 import traceback
+import urllib.request
 import uuid
 import wave
 from pathlib import Path
@@ -62,6 +64,24 @@ YOUTUBE_REMOTE_COMPONENTS = tuple(
     if component.strip()
 )
 YTDLP_PROXY = os.getenv("HALALSTREAM_YTDLP_PROXY", "").strip()
+
+COBALT_FALLBACK_APIS = [
+    "https://api.cobalt.blackcat.sweeux.org/",
+    "https://api.qwkuns.me/",
+    "https://cobaltapi.kittycat.boo/",
+    "https://cobaltapi.squair.xyz/",
+    "https://dog.kittycat.boo/",
+    "https://fox.kittycat.boo/",
+    "https://grapefruit.clxxped.lol/",
+    "https://lime.clxxped.lol/",
+    "https://melon.clxxped.lol/",
+    "https://nuko-c.meowing.de/",
+    "https://subito-c.meowing.de/",
+    "https://cobalt.alpha.wolfy.love/",
+    "https://cobalt.omega.wolfy.love/",
+    "https://blossom.imput.net/",
+    "https://sunny.imput.net/",
+]
 
 ASSETS_DIR.mkdir(exist_ok=True)
 STORAGE.mkdir(exist_ok=True)
@@ -352,7 +372,7 @@ def purify_job(job_id: str) -> None:
             raise RuntimeError("لم نجد مسار الصوت البشري الناتج من نموذج العزل.")
 
         ffmpeg = require_ffmpeg()
-        audio_out = encode_audio(job_id, vocals, "purified-audio.m4a", 86, "نجهز نسخة صوتية منقّاة وسريعة التحميل.")
+        audio_out = encode_audio(job_id, vocals, "purified-audio.m4a", 86, "نجهز نسخة صوتية منقّاة وسريعة التحميل.", filter_vocals=True)
         out = job_dir(job_id) / "purified.mp4"
         update_job(job_id, progress=92, message="نركّب الصوت المنقّى على المقطع دون إعادة ضغط الفيديو.")
         run_cmd(
@@ -391,39 +411,120 @@ def purify_job(job_id: str) -> None:
         fail_job(job_id, exc)
 
 
-def download_link(job_id: str, url: str) -> Path:
-    if yt_dlp is None:
-        raise RuntimeError("مكتبة yt-dlp غير مثبتة داخل بيئة المشروع.")
+def download_via_cobalt(job_id: str, url: str, workdir: Path) -> Path:
+    context = ssl._create_unverified_context()
+    payload = {
+        "url": url,
+        "audioFormat": "mp3",
+        "downloadMode": "audio",
+    }
+    data_bytes = json.dumps(payload).encode("utf-8")
+    
+    for api_url in COBALT_FALLBACK_APIS:
+        update_job(job_id, message=f"نحاول التنزيل عبر خادم مساند: {api_url.split('//')[1].split('/')[0]}")
+        try:
+            req = urllib.request.Request(
+                api_url,
+                data=data_bytes,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req, context=context, timeout=15) as response:
+                res = json.loads(response.read().decode("utf-8"))
+                
+                status = res.get("status")
+                if status in ("tunnel", "redirect"):
+                    download_url = res.get("url")
+                    filename = res.get("filename") or "downloaded.mp3"
+                    suffix = safe_suffix(filename)
+                    out_path = workdir / f"downloaded{suffix}"
+                    
+                    update_job(job_id, message="نجح خادم التنزيل المساند. نسحب الملف الصوتي الآن...")
+                    
+                    dl_req = urllib.request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(dl_req, context=context, timeout=30) as dl_res:
+                        with out_path.open("wb") as f:
+                            while True:
+                                chunk = dl_res.read(1024 * 1024)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
+                    if out_path.exists() and out_path.stat().st_size > 0:
+                        return out_path
+                elif status == "picker":
+                    picker_items = res.get("picker", [])
+                    if picker_items:
+                        download_url = picker_items[0].get("url")
+                        filename = picker_items[0].get("filename") or "downloaded.mp3"
+                        suffix = safe_suffix(filename)
+                        out_path = workdir / f"downloaded{suffix}"
+                        
+                        update_job(job_id, message="نجح خادم التنزيل المساند (عبر قائمة الخيارات). نسحب الملف...")
+                        
+                        dl_req = urllib.request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
+                        with urllib.request.urlopen(dl_req, context=context, timeout=30) as dl_res:
+                            with out_path.open("wb") as f:
+                                while True:
+                                    chunk = dl_res.read(1024 * 1024)
+                                    if not chunk:
+                                        break
+                                    f.write(chunk)
+                        if out_path.exists() and out_path.stat().st_size > 0:
+                            return out_path
+        except Exception as e:
+            print(f"Cobalt download failed on {api_url}: {e}")
+            
+    raise RuntimeError("فشلت جميع محاولات التنزيل المباشرة وعبر الخوادم المساندة.")
 
+
+def download_link(job_id: str, url: str) -> Path:
     workdir = job_dir(job_id)
     update_job(job_id, status="downloading", stage="تحميل المقطع", progress=8, message="نحمّل المقطع إلى خادم المعالجة.")
     download_errors: list[str] = []
     info: Optional[Dict[str, Any]] = None
 
-    for clients in youtube_download_clients(url):
-        cleanup_partial_downloads(workdir)
-        label = "، ".join(clients) if clients else "عام"
-        update_job(job_id, message=f"نحاول تنزيل الرابط عبر قناة آمنة: {label}.")
+    is_yt = is_youtube_url(url)
+
+    if is_yt and yt_dlp is not None:
+        for clients in youtube_download_clients(url):
+            cleanup_partial_downloads(workdir)
+            label = "، ".join(clients) if clients else "عام"
+            update_job(job_id, message=f"نحاول تنزيل الرابط عبر قناة آمنة: {label}.")
+            try:
+                with yt_dlp.YoutubeDL(build_ydl_options(workdir, job_id, clients)) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                break
+            except Exception as exc:
+                download_errors.append(f"{label}: {exc}")
+                update_job(job_id, message=f"تعذر التنزيل عبر {label}. نجرب قناة أخرى إن توفرت.")
+                time.sleep(1)
+
+    if info is not None:
+        media_path = find_downloaded_media(workdir)
+        if not media_path:
+            raise RuntimeError("اكتمل التحميل لكن لم نستطع تحديد ملف الوسائط الناتج.")
+        title = info.get("title") or "مقطع من رابط"
+    else:
+        if is_yt:
+            update_job(job_id, message="تعذر التنزيل المباشر. نحاول التنزيل عبر الخوادم المساندة...")
+        else:
+            update_job(job_id, message="رابط خارجي. نحاول التنزيل عبر الخوادم المساندة...")
+            
         try:
-            with yt_dlp.YoutubeDL(build_ydl_options(workdir, job_id, clients)) as ydl:
-                info = ydl.extract_info(url, download=True)
-            break
+            media_path = download_via_cobalt(job_id, url, workdir)
+            title = media_path.name
         except Exception as exc:
-            download_errors.append(f"{label}: {exc}")
-            update_job(job_id, message=f"تعذر التنزيل عبر {label}. نجرب قناة أخرى إن توفرت.")
-            time.sleep(1)
-
-    if info is None:
-        raise RuntimeError(youtube_download_error(download_errors))
-
-    media_path = find_downloaded_media(workdir)
-    if not media_path:
-        raise RuntimeError("اكتمل التحميل لكن لم نستطع تحديد ملف الوسائط الناتج.")
+            all_errors = download_errors + [str(exc)]
+            raise RuntimeError(youtube_download_error(all_errors))
 
     update_job(
         job_id,
         original_path=str(media_path),
-        title=info.get("title") or "مقطع من رابط",
+        title=title,
         status="extracting",
         stage="استخراج الصوت",
         progress=24,
@@ -610,25 +711,35 @@ def find_demucs_stems(out_dir: Path, stem_name: str) -> tuple[Path, Path]:
     return vocals, instrumental
 
 
-def encode_audio(job_id: str, source_audio: Path, filename: str, progress: int, message: str) -> Path:
+def encode_audio(job_id: str, source_audio: Path, filename: str, progress: int, message: str, filter_vocals: bool = False) -> Path:
     ffmpeg = require_ffmpeg()
     out = job_dir(job_id) / filename
     update_job(job_id, progress=progress, message=message)
+    
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(source_audio),
+        "-vn",
+    ]
+    if filter_vocals:
+        # Highpass filter at 100Hz to remove low-end music/bass leakage
+        # Audio gate to completely silence background noise/music during pauses in speech/singing
+        cmd.extend(["-af", "highpass=f=100,agate=threshold=0.015:range=0.05:attack=50:release=300"])
+        
+    cmd.extend([
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        str(out),
+    ])
+    
     run_cmd(
-        [
-            ffmpeg,
-            "-y",
-            "-i",
-            str(source_audio),
-            "-vn",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-movflags",
-            "+faststart",
-            str(out),
-        ],
+        cmd,
         "فشل تجهيز ملف الصوت.",
     )
     if not out.exists() or out.stat().st_size == 0:
@@ -825,7 +936,6 @@ def public_job(job_id: str) -> Optional[Dict[str, Any]]:
         for key, value in job.items()
         if key
         not in {
-            "instrumental_ratio",
             "confidence",
             "original_path",
             "audio_path",
