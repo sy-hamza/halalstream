@@ -58,6 +58,7 @@ let jobStartedAt = null;
 let lastLogMessage = "";
 let serverReady = false;
 let linkDownloadsReliable = true;
+let healthPollTimer = null;
 
 const waitingNotes = [
   "يمكنك ترك الصفحة مفتوحة والرجوع لاحقاً؛ خادم المعالجة سيكمل العمل ما دام السيرفر شغالاً.",
@@ -280,6 +281,10 @@ async function checkHealth() {
     engineJobs.textContent = linkDownloadsReliable ? "ثابت" : "رفع الملفات أفضل";
 
     if (serverReady) {
+      if (healthPollTimer) {
+        window.clearInterval(healthPollTimer);
+        healthPollTimer = null;
+      }
       serverText.textContent = "الخادم يعمل";
       if (!linkDownloadsReliable && activeMode === "link") {
         setMode("file");
@@ -310,13 +315,28 @@ async function checkHealth() {
     serverReady = false;
     serverPill.classList.add("is-error");
     serverPill.classList.remove("is-ready");
-    serverText.textContent = "الخادم غير متصل";
+    serverText.textContent = "الخادم يستيقظ...";
+    
+    // Automatically trigger wake-up via a hidden iframe
+    let wakeFrame = document.querySelector("#wake-up-frame");
+    if (!wakeFrame) {
+      wakeFrame = document.createElement("iframe");
+      wakeFrame.id = "wake-up-frame";
+      wakeFrame.src = "https://7haydar-halalstream.hf.space";
+      wakeFrame.style.display = "none";
+      document.body.appendChild(wakeFrame);
+    }
+
     const wakeUpUrl = "https://7haydar-halalstream.hf.space";
     updateStatus(
-      "السيرفر نائم حالياً 😴",
-      `السيرفر مطفأ تلقائياً لتوفير التكلفة أثناء عدم الاستخدام. <a href="${wakeUpUrl}" target="_blank" style="color: #b68134; font-weight: bold; text-decoration: underline; display: inline-block; margin-top: 4px;">انقر هنا لفتح السيرفر وإيقاظه في نافذة جديدة</a>، ثم انتظر 30 ثانية وأعد تحديث هذه الصفحة.`,
-      0
+      "جاري تشغيل خادم الذكاء الاصطناعي تلقائياً... ⚡",
+      `كان السيرفر في وضع الاستعداد لتوفير الطاقة والتكلفة. نقوم الآن بإيقاظه تلقائياً في الخلفية، يرجى الانتظار حوالي 20-30 ثانية وسيصبح جاهزاً للعمل تلقائياً دون أي تدخل منك. <br><a href="${wakeUpUrl}" target="_blank" style="color: #b68134; font-size: 0.76rem; text-decoration: underline; display: inline-block; margin-top: 8px;">إذا طال الانتظار لأكثر من دقيقة اضغط هنا للتنشيط يدوياً.</a>`,
+      25
     );
+
+    if (!healthPollTimer) {
+      healthPollTimer = window.setInterval(checkHealth, 4000);
+    }
   }
 }
 
