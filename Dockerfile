@@ -20,7 +20,7 @@ RUN curl -fsSL https://deno.land/install.sh | sh -s -- -y
 
 COPY --chown=user requirements.txt .
 RUN python -m pip install --user --no-cache-dir --upgrade pip \
-  && python -m pip install --user --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.2.2+cpu torchaudio==2.2.2+cpu \
+  && python -m pip install --user --no-cache-dir torch==2.2.2 torchaudio==2.2.2 \
   && python -m pip install --user --no-cache-dir -r requirements.txt
 
 COPY --chown=user . .
