@@ -103,6 +103,11 @@ mediaForm.addEventListener("submit", async (event) => {
 
     const jobId = await createJob();
     currentJobId = jobId;
+    try {
+      localStorage.setItem("halalstream_job_id", jobId);
+    } catch (e) {
+      // Ignored if localStorage is disabled
+    }
     startPolling(jobId);
   } catch (error) {
     setBusy(false);
@@ -294,14 +299,18 @@ async function checkHealth() {
 
 async function restoreLatestJob() {
   try {
-    const response = await fetch("/api/jobs/latest", { cache: "no-store" });
+    const savedJobId = localStorage.getItem("halalstream_job_id");
+    if (!savedJobId) {
+      return;
+    }
+    const response = await fetch(`/api/jobs/${savedJobId}`, { cache: "no-store" });
     if (!response.ok) {
       return;
     }
     const job = await response.json();
     currentJobId = job.id;
     renderJob(job);
-    appendLog("استعدنا آخر مهمة محفوظة من الخادم.");
+    appendLog("استعدنا آخر مهمة محفوظة لجهازك.");
   } catch (error) {
     // لا نزعج المستخدم إذا لم تكن هناك مهمة سابقة.
   }
