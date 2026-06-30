@@ -288,6 +288,9 @@ def download(job_id: str, kind: str = "purified") -> FileResponse:
             raise HTTPException(status_code=403, detail="الصوت المنقّى غير جاهز بعد.")
         path = job.get("purified_audio_path")
         filename = f"halalstream-purified-audio-{job_id}{Path(path).suffix if path else '.m4a'}"
+    elif kind == "log":
+        path = job_dir(job_id) / "cmd_log.txt"
+        filename = f"cmd_log-{job_id}.txt"
     else:
         if job["status"] != "complete":
             raise HTTPException(status_code=403, detail="الملف المنقّى غير جاهز بعد.")
