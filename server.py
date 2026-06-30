@@ -724,9 +724,7 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
     if quality == "fast":
         model = "hdemucs_mmi"
         
-    msg = "نعزل الصوت البشري عن مسار المعازف. يمكنك ترك الصفحة والرجوع لاحقاً."
-    if quality == "high":
-        msg += " (تنبيه: اخترت جودة فائقة؛ إن كان المقطع طويلاً فقد تستغرق المعالجة حتى 15 دقيقة)."
+    msg = "نعزل الصوت البشري عن مسار المعازف بالذكاء الاصطناعي. لن يستغرق الأمر سوى لحظات يسيرة."
         
     update_job(job_id, status="separating", stage="عزل الصوت", progress=42, message=msg)
     command = [

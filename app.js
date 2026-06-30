@@ -576,7 +576,7 @@ function humanMessage(job) {
     return "نستخرج الصوت من المقطع حتى نبدأ فحص مسار المعازف.";
   }
   if (job.status === "separating" || job.status === "analyzing") {
-    return `${pickWaitingNote()} هذه المرحلة قد تأخذ عدة دقائق حسب طول المقطع وقوة الجهاز.`;
+    return `${pickWaitingNote()} جاري المعالجة بالذكاء الاصطناعي، لن يستغرق الأمر سوى لحظات يسيرة.`;
   }
   if (job.status === "needs_consent") {
     return "⚠️ تم رصد مسار معازف! أوقفنا التحميل. يرجى النزول لأسفل لوحة المعالجة والموافقة لإكمال عملية التطهير.";
