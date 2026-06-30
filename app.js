@@ -111,7 +111,7 @@ mediaForm.addEventListener("submit", async (event) => {
   clearError();
 
   if (!serverReady) {
-    showError("خادم المعالجة غير متصل. إن كنت تعمل محلياً شغّل run-local.bat ثم افتح http://127.0.0.1:8000");
+    showError("خادم المعالجة غير متصل حالياً. يرجى فتح السيرفر وإيقاظه بالضغط على الرابط أسفل لوحة الانتظار.");
     return;
   }
 
@@ -311,9 +311,10 @@ async function checkHealth() {
     serverPill.classList.add("is-error");
     serverPill.classList.remove("is-ready");
     serverText.textContent = "الخادم غير متصل";
+    const wakeUpUrl = "https://syhamza-halalstream.hf.space";
     updateStatus(
-      "شغّل خادم المعالجة أولاً",
-      "افتح التطبيق من رابط الخادم. إن كنت تعمل محلياً شغّل run-local.bat ثم ادخل إلى http://127.0.0.1:8000.",
+      "السيرفر نائم حالياً 😴",
+      `السيرفر مطفأ تلقائياً لتوفير التكلفة أثناء عدم الاستخدام. <a href="${wakeUpUrl}" target="_blank" style="color: #b68134; font-weight: bold; text-decoration: underline; display: inline-block; margin-top: 4px;">انقر هنا لفتح السيرفر وإيقاظه في نافذة جديدة</a>، ثم انتظر 30 ثانية وأعد تحديث هذه الصفحة.`,
       0
     );
   }
@@ -494,7 +495,7 @@ function setMode(mode) {
 function updateStatus(title, message, progress) {
   const safeProgress = Math.max(0, Math.min(100, Number(progress) || 0));
   statusTitle.textContent = title;
-  statusMessage.textContent = message;
+  statusMessage.innerHTML = message;
   progressBar.style.width = `${safeProgress}%`;
   metricProgress.textContent = `${safeProgress}%`;
 }
