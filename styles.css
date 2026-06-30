@@ -1280,3 +1280,55 @@ audio {
   text-align: right;
 }
 
+/* Telegram Floating Support Badge */
+.support-badge {
+  position: fixed;
+  bottom: 20px;
+  left: 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(182, 129, 52, 0.08);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(182, 129, 52, 0.25);
+  color: #b68134;
+  padding: 8px 16px;
+  border-radius: 50px;
+  font-size: 0.8rem;
+  font-weight: bold;
+  text-decoration: none;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
+  z-index: 9999;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  direction: rtl;
+}
+
+.support-badge:hover {
+  transform: translateY(-3px) scale(1.03);
+  background: rgba(182, 129, 52, 0.15);
+  border-color: rgba(182, 129, 52, 0.4);
+  box-shadow: 0 8px 24px rgba(182, 129, 52, 0.12);
+}
+
+.support-badge-icon {
+  width: 18px;
+  height: 18px;
+  color: #b68134;
+  transition: transform 0.25s ease;
+}
+
+.support-badge:hover .support-badge-icon {
+  transform: rotate(-10deg) scale(1.1);
+}
+
+/* Hide Support Badge on narrow mobile screens if it covers content */
+@media (max-width: 480px) {
+  .support-badge {
+    padding: 8px 12px;
+    font-size: 0.74rem;
+    bottom: 12px;
+    left: 12px;
+  }
+}
+
