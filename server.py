@@ -42,7 +42,15 @@ DEMUCS_MODEL = os.getenv("HALALSTREAM_DEMUCS_MODEL", "htdemucs")
 DEMUCS_JOBS = int(os.getenv("HALALSTREAM_DEMUCS_JOBS", "1"))
 DEMUCS_SEGMENT = int(float(os.getenv("HALALSTREAM_DEMUCS_SEGMENT", "3")))
 DEMUCS_OVERLAP = float(os.getenv("HALALSTREAM_DEMUCS_OVERLAP", "0.1"))
-MAX_ACTIVE_PROCESSING_JOBS = max(1, int(os.getenv("HALALSTREAM_MAX_ACTIVE_PROCESSING_JOBS", "1")))
+# Dynamically adjust active jobs based on GPU availability
+try:
+    import torch
+    HAS_GPU = torch.cuda.is_available()
+except ImportError:
+    HAS_GPU = False
+
+default_max_jobs = "3" if HAS_GPU else "1"
+MAX_ACTIVE_PROCESSING_JOBS = max(1, int(os.getenv("HALALSTREAM_MAX_ACTIVE_PROCESSING_JOBS", default_max_jobs)))
 HOSTED_SPACE = bool(os.getenv("SPACE_ID") or os.getenv("SPACE_HOST"))
 ALLOW_LINK_DOWNLOADS = os.getenv("HALALSTREAM_ALLOW_LINK_DOWNLOADS", "").strip().lower() in {"1", "true", "yes"}
 LINK_DOWNLOADS_RELIABLE = True
