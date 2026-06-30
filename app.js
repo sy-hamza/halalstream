@@ -59,6 +59,7 @@ const waitingNotes = [
   "يمكنك ترك الصفحة مفتوحة والرجوع لاحقاً؛ خادم المعالجة سيكمل العمل ما دام السيرفر شغالاً.",
   "استغل وقت الانتظار بالاستغفار: أستغفر الله وأتوب إليه.",
   "قال تعالى: {وَمَنْ يَتَّقِ اللَّهَ يَجْعَلْ لَهُ مَخْرَجًا}.",
+  "يُمسخُ قومٌ من أمتي في آخرِ الزمانِ قِرَدةً وخنازيرَ، قيل : يا رسولَ اللهِ ويشهدونَ أنْ لا إلهَ إلا اللهُ وأنك رسولُ اللهِ ويصومون ؟ قال : نعم. قيل : فما بالُهم يا رسولَ اللهِ ؟ قال : يتخذونَ المعازفَ والقيناتِ والدفوفَ ويشربونَ الأشربةَ فباتوا على شُربِهم ولهوِهم، فأصبحوا وقد مُسِخوا قِرَدةً وخنازيرَ",
   "نحاول إبقاء الصوت البشري وحذف مسار المعازف قدر الإمكان.",
   "دع قلبك يستريح بذكر الله حتى يكتمل العمل."
 ];
@@ -349,7 +350,7 @@ async function createJob() {
     const response = await fetch("/api/jobs/link", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ 
+      body: JSON.stringify({
         url,
         purify_mode: purifyModeVal,
         quality: qualityVal
@@ -443,7 +444,7 @@ function renderJob(job) {
       warningRatioEl.hidden = false;
     }
     warningCard.hidden = false;
-    
+
     // Auto-scroll to the warning card so the user notices the action on mobile
     window.setTimeout(() => {
       warningCard.scrollIntoView({ behavior: "smooth", block: "center" });
