@@ -7,7 +7,7 @@ ENV PATH=/home/user/.local/bin:$PATH
 ENV HALALSTREAM_STORAGE_DIR=/home/user/app/storage
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates ffmpeg curl \
+  && apt-get install -y --no-install-recommends ca-certificates ffmpeg curl nodejs \
   && update-ca-certificates \
   && rm -rf /var/lib/apt/lists/* \
   && useradd -m -u 1000 user

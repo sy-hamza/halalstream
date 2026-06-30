@@ -42,10 +42,10 @@ HOSTED_SPACE = bool(os.getenv("SPACE_ID") or os.getenv("SPACE_HOST"))
 ALLOW_LINK_DOWNLOADS = os.getenv("HALALSTREAM_ALLOW_LINK_DOWNLOADS", "").strip().lower() in {"1", "true", "yes"}
 LINK_DOWNLOADS_RELIABLE = (not HOSTED_SPACE) or ALLOW_LINK_DOWNLOADS
 YOUTUBE_CLIENT_FALLBACKS = tuple(
-    (client.strip(),)
-    for client in os.getenv("HALALSTREAM_YOUTUBE_CLIENTS", "android,web,mweb").split(",")
+    () if client.strip().lower() in {"default", "auto"} else (client.strip(),)
+    for client in os.getenv("HALALSTREAM_YOUTUBE_CLIENTS", "default,android,web,mweb").split(",")
     if client.strip()
-) or (("android",),)
+) or ((),)
 YOUTUBE_SOCKET_TIMEOUT = int(os.getenv("HALALSTREAM_YOUTUBE_SOCKET_TIMEOUT", "12"))
 YOUTUBE_RETRIES = int(os.getenv("HALALSTREAM_YOUTUBE_RETRIES", "1"))
 YTDLP_COOKIES = os.getenv("HALALSTREAM_YTDLP_COOKIES", "").strip()
