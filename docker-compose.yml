@@ -18,8 +18,7 @@ services:
       HALALSTREAM_ALLOW_LINK_DOWNLOADS: "true"
       HALALSTREAM_YOUTUBE_POT_BASE_URL: http://youtube-pot:4416
       HALALSTREAM_YOUTUBE_FETCH_POT: always
-      # Optional: export YouTube cookies from your browser when YouTube requires login.
-      # HALALSTREAM_YTDLP_COOKIES: /home/user/app/secrets/cookies.txt
+      HALALSTREAM_YTDLP_COOKIES: /home/user/app/secrets/cookies.txt
     volumes:
       - halalstream-storage:/home/user/app/storage
       - ./secrets:/home/user/app/secrets
