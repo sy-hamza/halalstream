@@ -284,13 +284,13 @@ async function checkHealth() {
         "خادم المعالجة جاهز",
         linkDownloadsReliable
           ? "أرسل رابطاً أو ملفاً، وسنوقف التحميل إن ظهرت معازف حتى تختار إزالتها."
-          : "ارفع ملفاً من جهازك للحصول على نتيجة أثبت على الاستضافة المجانية الحالية.",
+          : "ارفع ملفاً من جهازك للحصول على نتيجة أثبت.",
         0
       );
       resetLog(
         linkDownloadsReliable
           ? "الخادم جاهز. أرسل المقطع، ويمكنك متابعة الصفحة أو الرجوع لها لاحقاً."
-          : "الخادم جاهز. رفع الملف مباشرة هو المسار الأنسب لهذه الاستضافة المجانية."
+          : "الخادم جاهز. رفع الملف مباشرة هو المسار الأنسب لهذه الاستضافة."
       );
       await restoreLatestJob();
       return;
@@ -345,7 +345,7 @@ async function createJob() {
     }
     const url = /^[a-z][a-z0-9+.-]*:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
     if (!linkDownloadsReliable && isYouTubeUrl(url)) {
-      throw new Error("روابط YouTube لا تعمل بثبات على الاستضافة المجانية الحالية. نزّل الملف على جهازك ثم ارفعه من تبويب ملف.");
+      throw new Error("روابط YouTube لا تعمل بثبات على الاستضافة الحالية. نزّل الملف على جهازك ثم ارفعه من تبويب ملف.");
     }
     const response = await fetch("/api/jobs/link", {
       method: "POST",
@@ -570,7 +570,7 @@ function humanStage(job) {
 
 function humanMessage(job) {
   if (job.status === "downloading") {
-    return "نحمّل المقطع إلى خادم المعالجة. إن طال انتظار رابط YouTube على الاستضافة المجانية، فتبويب ملف أسرع وأثبت غالباً.";
+    return "نحمّل المقطع إلى خادم المعالجة. إن طال الانتظار، فتبويب ملف أسرع وأثبت غالباً.";
   }
   if (job.status === "extracting") {
     return "نستخرج الصوت من المقطع حتى نبدأ فحص مسار المعازف.";
@@ -594,7 +594,7 @@ function humanMessage(job) {
 }
 
 function humanLog(job) {
-  if (job.status === "downloading") return "تحميل المقطع: روابط YouTube قد تتأخر على الاستضافة المجانية؛ رفع الملف مباشرة يكون أسرع غالباً.";
+  if (job.status === "downloading") return "تحميل المقطع: روابط YouTube قد تتأخر؛ رفع الملف مباشرة يكون أسرع غالباً.";
   if (job.status === "extracting") return "استخراج الصوت: نجهز المسار الصوتي للفحص.";
   if (job.status === "separating") return `عزل الصوت: ${pickWaitingNote()}`;
   if (job.status === "analyzing") return "مراجعة النتيجة: نتحقق قبل السماح بالتحميل.";

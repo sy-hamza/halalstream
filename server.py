@@ -144,7 +144,7 @@ def create_link_job(payload: LinkJobRequest) -> Dict[str, str]:
     if is_youtube_url(str(payload.url)) and not LINK_DOWNLOADS_RELIABLE:
         raise HTTPException(
             status_code=400,
-            detail="الاستضافة المجانية الحالية لا تنزّل روابط YouTube بثبات. نزّل الملف على جهازك ثم ارفعه من تبويب ملف، أو انقل الخادم إلى VPS أقوى.",
+            detail="الاستضافة الحالية لا تنزّل روابط YouTube بثبات. نزّل الملف على جهازك ثم ارفعه من تبويب ملف.",
         )
     job = create_job(
         "link",
@@ -457,8 +457,8 @@ def download_via_cobalt(job_id: str, url: str, workdir: Path) -> Path:
     context = ssl._create_unverified_context()
     payload = {
         "url": url,
-        "audioFormat": "mp3",
-        "downloadMode": "audio",
+        "downloadMode": "auto",
+        "videoQuality": "720",
     }
     data_bytes = json.dumps(payload).encode("utf-8")
     
@@ -481,11 +481,11 @@ def download_via_cobalt(job_id: str, url: str, workdir: Path) -> Path:
                 status = res.get("status")
                 if status in ("tunnel", "redirect"):
                     download_url = res.get("url")
-                    filename = res.get("filename") or "downloaded.mp3"
+                    filename = res.get("filename") or "downloaded.mp4"
                     suffix = safe_suffix(filename)
                     out_path = workdir / f"downloaded{suffix}"
                     
-                    update_job(job_id, message="نجح خادم التنزيل المساند. نسحب الملف الصوتي الآن...")
+                    update_job(job_id, message="نجح خادم التنزيل المساند. نسحب الملف الآن...")
                     
                     dl_req = urllib.request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
                     with urllib.request.urlopen(dl_req, context=context, timeout=30) as dl_res:
@@ -501,7 +501,7 @@ def download_via_cobalt(job_id: str, url: str, workdir: Path) -> Path:
                     picker_items = res.get("picker", [])
                     if picker_items:
                         download_url = picker_items[0].get("url")
-                        filename = picker_items[0].get("filename") or "downloaded.mp3"
+                        filename = picker_items[0].get("filename") or "downloaded.mp4"
                         suffix = safe_suffix(filename)
                         out_path = workdir / f"downloaded{suffix}"
                         
@@ -657,7 +657,7 @@ def youtube_download_error(errors: list[str]) -> str:
     if "UNEXPECTED_EOF_WHILE_READING" in last_error or "SSL" in last_error:
         return (
             "تعذر تنزيل الرابط من YouTube داخل الاستضافة بسبب انقطاع اتصال SSL. "
-            "حدّثنا الخادم ليجرب عدة قنوات تلقائياً، لكن إن تكرر الخطأ فغالباً أن الاستضافة المجانية تقطع اتصال YouTube مؤقتاً. "
+            "حدّثنا الخادم ليجرب عدة قنوات تلقائياً، لكن إن تكرر الخطأ فغالباً أن الاستضافة تقطع اتصال YouTube مؤقتاً. "
             "جرّب مرة أخرى، أو ارفع الملف من جهازك عبر تبويب ملف."
         )
     if "HTTP Error 403" in last_error or "Forbidden" in last_error:
@@ -717,7 +717,7 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
         
     msg = "نعزل الصوت البشري عن مسار المعازف. يمكنك ترك الصفحة والرجوع لاحقاً."
     if quality == "high":
-        msg += " (تنبيه: اخترت جودة فائقة؛ إن كان المقطع طويلاً فقد تستغرق المعالجة حتى 15 دقيقة على الخادم المجاني)."
+        msg += " (تنبيه: اخترت جودة فائقة؛ إن كان المقطع طويلاً فقد تستغرق المعالجة حتى 15 دقيقة)."
         
     update_job(job_id, status="separating", stage="عزل الصوت", progress=42, message=msg)
     command = [
@@ -776,9 +776,12 @@ def encode_audio(job_id: str, source_audio: Path, filename: str, progress: int, 
         "-vn",
     ]
     if filter_vocals:
-        # Highpass filter at 100Hz to remove low-end music/bass leakage
-        # Audio gate to completely silence background noise/music during pauses in speech/singing
-        cmd.extend(["-af", "highpass=f=100,agate=threshold=0.015:range=0.05:attack=50:release=300"])
+        # Aggressive multi-stage vocal purification pipeline:
+        # 1) highpass=f=120 — cut sub-bass music leakage more aggressively
+        # 2) lowpass=f=8000 — remove high-frequency instrument harmonics/cymbals
+        # 3) agate — silence background music in speech pauses (tight threshold)
+        # 4) dynaudnorm — normalize dynamics so quiet music remnants don't persist
+        cmd.extend(["-af", "highpass=f=120,lowpass=f=8000,agate=threshold=0.02:range=0.02:attack=20:release=200,dynaudnorm=g=5:p=0.71:m=10"])
         
     cmd.extend([
         "-c:a",
@@ -1047,7 +1050,7 @@ def friendly_error(message: str) -> str:
         if "AssertionError" in message or "pad1d" in message:
             return "تعذر عزل الصوت لأن الملف قصير جداً أو صامت تقريباً. جرّب ملفاً أطول قليلاً أو مقطعاً واضح الصوت."
         if "Killed" in message or "out of memory" in message.lower() or "cannot allocate memory" in message.lower():
-            return "موارد الاستضافة المجانية لم تكفِ لعزل هذا المقطع. جرّب مقطعاً أقصر أو انقل الخادم إلى VPS أقوى."
+            return "موارد الاستضافة لم تكفِ لعزل هذا المقطع. جرّب مقطعاً أقصر."
         return "تعذر تشغيل محرك عزل الصوت على هذا الملف. جرّب ملفاً أقصر أو صيغة صوت/فيديو أخرى."
     if "HTTP Error 403" in message or "Forbidden" in message:
         return "منع YouTube تنزيل هذا الرابط مؤقتاً. أعد المحاولة، وإن تكرر الخطأ فقد يحتاج الرابط إلى كوكيز المتصفح أو طريقة تحميل مختلفة."
