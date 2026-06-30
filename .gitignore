@@ -4,6 +4,7 @@ assets/*.png
 secrets/
 storage/
 tools/ffmpeg/
+tools/*.exe
 __pycache__/
 *.pyc
 *.log

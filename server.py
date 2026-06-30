@@ -43,7 +43,7 @@ ALLOW_LINK_DOWNLOADS = os.getenv("HALALSTREAM_ALLOW_LINK_DOWNLOADS", "").strip()
 LINK_DOWNLOADS_RELIABLE = (not HOSTED_SPACE) or ALLOW_LINK_DOWNLOADS
 YOUTUBE_CLIENT_FALLBACKS = tuple(
     () if client.strip().lower() in {"default", "auto"} else (client.strip(),)
-    for client in os.getenv("HALALSTREAM_YOUTUBE_CLIENTS", "default,android,web,mweb").split(",")
+    for client in os.getenv("HALALSTREAM_YOUTUBE_CLIENTS", "web,mweb").split(",")
     if client.strip()
 ) or ((),)
 YOUTUBE_SOCKET_TIMEOUT = int(os.getenv("HALALSTREAM_YOUTUBE_SOCKET_TIMEOUT", "12"))
