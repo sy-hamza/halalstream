@@ -53,6 +53,11 @@ YOUTUBE_POT_BASE_URL = os.getenv("HALALSTREAM_YOUTUBE_POT_BASE_URL", "").strip()
 YOUTUBE_FETCH_POT = os.getenv("HALALSTREAM_YOUTUBE_FETCH_POT", "auto").strip().lower()
 if YOUTUBE_FETCH_POT not in {"auto", "always", "never"}:
     YOUTUBE_FETCH_POT = "auto"
+YOUTUBE_REMOTE_COMPONENTS = tuple(
+    component.strip()
+    for component in os.getenv("HALALSTREAM_YOUTUBE_REMOTE_COMPONENTS", "ejs:github").split(",")
+    if component.strip()
+)
 
 ASSETS_DIR.mkdir(exist_ok=True)
 STORAGE.mkdir(exist_ok=True)
@@ -98,6 +103,7 @@ def health() -> Dict[str, Any]:
         "link_downloads_reliable": LINK_DOWNLOADS_RELIABLE,
         "youtube_pot_provider": bool(YOUTUBE_POT_BASE_URL),
         "youtube_fetch_pot": YOUTUBE_FETCH_POT,
+        "youtube_remote_components": list(YOUTUBE_REMOTE_COMPONENTS),
         "message": "الخادم يعمل. اكتمال المعالجة يحتاج yt-dlp و ffmpeg و demucs.",
     }
 
@@ -443,6 +449,7 @@ def build_ydl_options(workdir: Path, job_id: str, youtube_clients: tuple[str, ..
         "cachedir": False,
         "source_address": "0.0.0.0",
         "ffmpeg_location": str(Path(require_ffmpeg()).parent),
+        "remote_components": list(YOUTUBE_REMOTE_COMPONENTS),
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
