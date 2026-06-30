@@ -489,7 +489,7 @@ def download_link(job_id: str, url: str) -> Path:
 
     is_yt = is_youtube_url(url)
 
-    if is_yt and yt_dlp is not None:
+    if is_yt and yt_dlp is not None and not HOSTED_SPACE:
         for clients in youtube_download_clients(url):
             cleanup_partial_downloads(workdir)
             label = "، ".join(clients) if clients else "عام"
