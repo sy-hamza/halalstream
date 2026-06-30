@@ -796,12 +796,13 @@ def encode_audio(job_id: str, source_audio: Path, filename: str, progress: int, 
         "-vn",
     ]
     if filter_vocals:
-        # Aggressive multi-stage vocal purification pipeline:
-        # 1) highpass=f=120 — cut sub-bass music leakage more aggressively
-        # 2) lowpass=f=8000 — remove high-frequency instrument harmonics/cymbals
-        # 3) agate — silence background music in speech pauses (tight threshold)
-        # 4) dynaudnorm — normalize dynamics so quiet music remnants don't persist
-        cmd.extend(["-af", "highpass=f=120,lowpass=f=8000,agate=threshold=0.02:range=0.02:attack=20:release=200,dynaudnorm=g=5:p=0.71:m=10"])
+        # Super-aggressive vocal purification pipeline:
+        # 1) highpass=f=150 — cut bass/mid-bass leaks completely (vocals start higher)
+        # 2) lowpass=f=6000 — cut high-frequency cymbals/synths completely
+        # 3) afftdn=nf=-45 — FFT noise filter to kill background synth pads & reverb tail leakage
+        # 4) agate — fast-acting noise gate (threshold=0.04, near-absolute attenuation) to mute instrument gaps instantly
+        # 5) dynaudnorm — normalize speech levels
+        cmd.extend(["-af", "highpass=f=150,lowpass=f=6000,afftdn=nf=-45,agate=threshold=0.04:range=0.01:attack=10:release=120,dynaudnorm=g=5:p=0.71:m=10"])
         
     cmd.extend([
         "-c:a",

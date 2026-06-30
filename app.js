@@ -92,16 +92,13 @@ mediaFile.addEventListener("change", () => {
 
 // Toggle purify sub-options and warning box depending on selected mode
 const purifyModeRadios = document.querySelectorAll('input[name="purify_mode"]');
-const purifyQualityOptions = document.querySelector("#purify-quality-options");
 const directWarningBox = document.querySelector("#direct-warning-box");
 
 purifyModeRadios.forEach((radio) => {
   radio.addEventListener("change", () => {
     if (radio.value === "purify") {
-      purifyQualityOptions.style.display = "flex";
       directWarningBox.hidden = true;
     } else {
-      purifyQualityOptions.style.display = "none";
       directWarningBox.hidden = false;
     }
   });
@@ -361,7 +358,7 @@ async function restoreLatestJob() {
 
 async function createJob() {
   const purifyModeVal = document.querySelector('input[name="purify_mode"]:checked').value;
-  const qualityVal = document.querySelector('input[name="quality"]:checked').value;
+  const qualityVal = document.querySelector('input[name="quality"]').value;
 
   if (activeMode === "link") {
     const rawUrl = mediaUrl.value.trim();
