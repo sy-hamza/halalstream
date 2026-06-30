@@ -45,7 +45,7 @@ DEMUCS_OVERLAP = float(os.getenv("HALALSTREAM_DEMUCS_OVERLAP", "0.1"))
 MAX_ACTIVE_PROCESSING_JOBS = max(1, int(os.getenv("HALALSTREAM_MAX_ACTIVE_PROCESSING_JOBS", "1")))
 HOSTED_SPACE = bool(os.getenv("SPACE_ID") or os.getenv("SPACE_HOST"))
 ALLOW_LINK_DOWNLOADS = os.getenv("HALALSTREAM_ALLOW_LINK_DOWNLOADS", "").strip().lower() in {"1", "true", "yes"}
-LINK_DOWNLOADS_RELIABLE = (not HOSTED_SPACE) or ALLOW_LINK_DOWNLOADS
+LINK_DOWNLOADS_RELIABLE = True
 YOUTUBE_CLIENT_FALLBACKS = tuple(
     () if client.strip().lower() in {"default", "auto"} else (client.strip(),)
     for client in os.getenv("HALALSTREAM_YOUTUBE_CLIENTS", "web,mweb").split(",")
