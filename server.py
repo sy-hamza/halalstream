@@ -137,6 +137,7 @@ def health() -> Dict[str, Any]:
         "demucs_segment": DEMUCS_SEGMENT,
         "demucs_overlap": DEMUCS_OVERLAP,
         "max_active_processing_jobs": MAX_ACTIVE_PROCESSING_JOBS,
+        "cuda_available": (lambda: __import__("torch").cuda.is_available() if has_module("torch") else False)(),
         "hosted_space": HOSTED_SPACE,
         "link_downloads_reliable": LINK_DOWNLOADS_RELIABLE,
         "yt_dlp_proxy": bool(YTDLP_PROXY),
