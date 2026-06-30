@@ -97,6 +97,8 @@ processing_semaphore = threading.BoundedSemaphore(MAX_ACTIVE_PROCESSING_JOBS)
 
 class LinkJobRequest(BaseModel):
     url: HttpUrl
+    purify_mode: str = "purify"
+    quality: str = "high"
 
 
 @app.get("/")
@@ -144,17 +146,31 @@ def create_link_job(payload: LinkJobRequest) -> Dict[str, str]:
             status_code=400,
             detail="الاستضافة المجانية الحالية لا تنزّل روابط YouTube بثبات. نزّل الملف على جهازك ثم ارفعه من تبويب ملف، أو انقل الخادم إلى VPS أقوى.",
         )
-    job = create_job("link", source_url=str(payload.url))
+    job = create_job(
+        "link",
+        source_url=str(payload.url),
+        purify_mode=payload.purify_mode,
+        quality=payload.quality
+    )
     start_worker(process_job, job["id"])
     return {"id": job["id"]}
 
 
 @app.post("/api/jobs/upload")
-async def create_upload_job(file: UploadFile = File(...)) -> Dict[str, str]:
+async def create_upload_job(
+    file: UploadFile = File(...),
+    purify_mode: str = Form("purify"),
+    quality: str = Form("high")
+) -> Dict[str, str]:
     if not file.filename:
         raise HTTPException(status_code=400, detail="لم يصل اسم الملف إلى الخادم.")
 
-    job = create_job("upload", source_name=file.filename)
+    job = create_job(
+        "upload",
+        source_name=file.filename,
+        purify_mode=purify_mode,
+        quality=quality
+    )
     workdir = job_dir(job["id"])
     suffix = safe_suffix(file.filename)
     original_path = workdir / f"uploaded{suffix}"
@@ -266,7 +282,13 @@ def download(job_id: str, kind: str = "purified") -> FileResponse:
     return FileResponse(path, filename=filename)
 
 
-def create_job(source_type: str, source_url: Optional[str] = None, source_name: Optional[str] = None) -> Dict[str, Any]:
+def create_job(
+    source_type: str,
+    source_url: Optional[str] = None,
+    source_name: Optional[str] = None,
+    purify_mode: str = "purify",
+    quality: str = "high"
+) -> Dict[str, Any]:
     job_id = uuid.uuid4().hex[:12]
     workdir = job_dir(job_id)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -279,6 +301,8 @@ def create_job(source_type: str, source_url: Optional[str] = None, source_name: 
         "source_type": source_type,
         "source_url": source_url,
         "source_name": source_name,
+        "purify_mode": purify_mode,
+        "quality": quality,
         "title": source_name or "مقطع من رابط",
         "created_at": time.time(),
         "updated_at": time.time(),
@@ -319,8 +343,26 @@ def process_job(job_id: str) -> None:
             original = Path(job["original_path"])
             update_job(job_id, status="extracting", stage="استخراج الصوت", progress=24, message="نجهز الملف للتحليل.")
 
+        purify_mode = job.get("purify_mode", "purify")
+        quality = job.get("quality", "high")
+
+        if purify_mode == "direct":
+            # Direct bypass mode: mark clean instantly and return original path as clean path
+            update_job(
+                job_id,
+                status="clean",
+                stage="جاهز للتحميل",
+                progress=100,
+                message="الحمد لله، تم التجهيز للتحميل المباشر فوراً بناءً على تأكيدك بخلو المقطع من أي معازف.",
+                has_music=False,
+                instrumental_ratio=0.0,
+                confidence=1.0,
+                clean_audio_path=str(original),
+            )
+            return
+
         audio = extract_audio(job_id, original)
-        vocals, instrumental = separate_vocals(job_id, audio)
+        vocals, instrumental = separate_vocals(job_id, audio, quality=quality)
         ratio, confidence = estimate_music_ratio(audio, vocals, instrumental)
         has_music = ratio >= MUSIC_RATIO_THRESHOLD
 
@@ -660,14 +702,24 @@ def extract_audio(job_id: str, original: Path) -> Path:
     return audio
 
 
-def separate_vocals(job_id: str, audio: Path) -> tuple[Path, Path]:
+def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Path, Path]:
     if not has_module("demucs"):
         raise RuntimeError("مكتبة demucs غير مثبتة. ثبّت المتطلبات ثم أعد تشغيل السيرفر.")
     if not audio.exists() or audio.stat().st_size == 0:
         raise RuntimeError("ملف الصوت المطلوب للعزل غير موجود. أعد المحاولة بعد إعادة تشغيل الخادم.")
 
     out_dir = job_dir(job_id) / "separated"
-    update_job(job_id, status="separating", stage="عزل الصوت", progress=42, message="نعزل الصوت البشري عن مسار المعازف. يمكنك ترك الصفحة والرجوع لاحقاً.")
+    
+    # Select Demucs model based on requested quality
+    model = DEMUCS_MODEL # "htdemucs"
+    if quality == "fast":
+        model = "hdemucs_mmi"
+        
+    msg = "نعزل الصوت البشري عن مسار المعازف. يمكنك ترك الصفحة والرجوع لاحقاً."
+    if quality == "high":
+        msg += " (تنبيه: اخترت جودة فائقة؛ إن كان المقطع طويلاً فقد تستغرق المعالجة حتى 15 دقيقة على الخادم المجاني)."
+        
+    update_job(job_id, status="separating", stage="عزل الصوت", progress=42, message=msg)
     command = [
         sys.executable,
         "-m",
@@ -675,7 +727,7 @@ def separate_vocals(job_id: str, audio: Path) -> tuple[Path, Path]:
         "--two-stems",
         "vocals",
         "-n",
-        DEMUCS_MODEL,
+        model,
         "-j",
         str(max(1, DEMUCS_JOBS)),
         "--overlap",

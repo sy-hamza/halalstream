@@ -84,6 +84,23 @@ mediaFile.addEventListener("change", () => {
   fileName.textContent = mediaFile.files[0]?.name || "لم يتم اختيار ملف بعد";
 });
 
+// Toggle purify sub-options and warning box depending on selected mode
+const purifyModeRadios = document.querySelectorAll('input[name="purify_mode"]');
+const purifyQualityOptions = document.querySelector("#purify-quality-options");
+const directWarningBox = document.querySelector("#direct-warning-box");
+
+purifyModeRadios.forEach((radio) => {
+  radio.addEventListener("change", () => {
+    if (radio.value === "purify") {
+      purifyQualityOptions.style.display = "flex";
+      directWarningBox.hidden = true;
+    } else {
+      purifyQualityOptions.style.display = "none";
+      directWarningBox.hidden = false;
+    }
+  });
+});
+
 mediaForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   clearError();
@@ -317,6 +334,9 @@ async function restoreLatestJob() {
 }
 
 async function createJob() {
+  const purifyModeVal = document.querySelector('input[name="purify_mode"]:checked').value;
+  const qualityVal = document.querySelector('input[name="quality"]:checked').value;
+
   if (activeMode === "link") {
     const rawUrl = mediaUrl.value.trim();
     if (!rawUrl) {
@@ -329,7 +349,11 @@ async function createJob() {
     const response = await fetch("/api/jobs/link", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url })
+      body: JSON.stringify({ 
+        url,
+        purify_mode: purifyModeVal,
+        quality: qualityVal
+      })
     });
     if (!response.ok) {
       throw new Error(await readError(response));
@@ -339,6 +363,9 @@ async function createJob() {
   }
 
   const formData = new FormData();
+  formData.append("purify_mode", purifyModeVal);
+  formData.append("quality", qualityVal);
+
   if (activeMode === "file") {
     const file = mediaFile.files[0];
     if (!file) {

@@ -109,6 +109,53 @@
                 <audio id="record-preview" controls hidden></audio>
               </div>
 
+              <!-- خيارات المعالجة والتحميل -->
+              <div class="processing-options-card">
+                <div class="options-title">⚙️ خيارات المعالجة والتحميل</div>
+                <div class="options-group">
+                  
+                  <label class="option-row">
+                    <input type="radio" name="purify_mode" value="purify" checked />
+                    <span class="option-label">
+                      <span class="option-name">تطهير وعزل ذكي (حذف الموسيقى)</span>
+                      <span class="option-desc">يقوم بعزل مسار الغناء وتصفية المعازف بالذكاء الاصطناعي.</span>
+                    </span>
+                  </label>
+
+                  <!-- خيارات جودة العزل -->
+                  <div class="sub-options" id="purify-quality-options">
+                    <label class="option-row" style="padding: 4px 8px; margin: 0;">
+                      <input type="radio" name="quality" value="high" checked />
+                      <span class="option-label">
+                        <span class="option-name" style="font-size: 0.82rem;">جودة فائقة (عزل كامل - أبطأ)</span>
+                        <span class="option-desc" style="font-size: 0.74rem;">يستخدم النموذج الشامل لمعالجة أدق. قد يستغرق المقطع الطويل حتى 15 دقيقة على الاستضافة المجانية.</span>
+                      </span>
+                    </label>
+                    <label class="option-row" style="padding: 4px 8px; margin: 0;">
+                      <input type="radio" name="quality" value="fast" />
+                      <span class="option-label">
+                        <span class="option-name" style="font-size: 0.82rem;">معالجة سريعة (أسرع بضعفين)</span>
+                        <span class="option-desc" style="font-size: 0.74rem;">يستخدم نموذج عزل خفيف ومسرّع يوفر أكثر من نصف وقت الانتظار.</span>
+                      </span>
+                    </label>
+                  </div>
+
+                  <label class="option-row">
+                    <input type="radio" name="purify_mode" value="direct" />
+                    <span class="option-label">
+                      <span class="option-name">تحميل مباشر وسريع (بدون عزل)</span>
+                      <span class="option-desc">تنزيل فوري للمقطع دون فحص أو عزل بالخادم (خلال ثوانٍ).</span>
+                    </span>
+                  </label>
+
+                  <!-- تحذير التحميل المباشر -->
+                  <div class="warning-box" id="direct-warning-box" hidden>
+                    ⚠️ <strong>تنبيه الأمان والعهد:</strong> هل أنت متأكد تماماً أن هذا المقطع خالي من أي موسيقى أو معازف؟ باختيارك هذا، فإنك تتحمل المسؤولية الكاملة وتؤكد خلوه قبل التحميل.
+                  </div>
+
+                </div>
+              </div>
+
               <button class="primary-button" id="submit-button" type="submit">بدء الفحص الآن</button>
               <p class="form-error" id="form-error" role="alert" hidden></p>
             </form>
