@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM pytorch/pytorch:2.2.2-cuda12.1-cudnn8-runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -20,7 +20,6 @@ RUN curl -fsSL https://deno.land/install.sh | sh -s -- -y
 
 COPY --chown=user requirements.txt .
 RUN python -m pip install --user --no-cache-dir --upgrade pip \
-  && python -m pip install --user --no-cache-dir torch==2.2.2 torchaudio==2.2.2 \
   && python -m pip install --user --no-cache-dir -r requirements.txt
 
 COPY --chown=user . .
