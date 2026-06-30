@@ -751,13 +751,17 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
         "-j",
         str(max(1, DEMUCS_JOBS)),
         "--shifts",
-        "4",
+        "2",
         "--overlap",
         "0.5",
+    ]
+    if HAS_GPU:
+        command.extend(["-d", "cuda"])
+    command.extend([
         "-o",
         str(out_dir),
         str(audio),
-    ]
+    ])
     if DEMUCS_SEGMENT > 0:
         command.extend(["--segment", str(int(DEMUCS_SEGMENT))])
     run_cmd(command, "فشل محرك عزل الصوت.")
