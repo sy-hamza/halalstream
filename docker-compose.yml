@@ -22,7 +22,7 @@ services:
     depends_on:
       - youtube-pot
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       HALALSTREAM_STORAGE_DIR: /home/user/app/storage
       HALALSTREAM_DEMUCS_JOBS: "1"
