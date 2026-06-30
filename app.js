@@ -1,3 +1,7 @@
+const API_BASE = window.location.hostname.includes("hf.space") 
+  ? "" 
+  : "https://syhamza-halalstream.hf.space";
+
 const tabs = Array.from(document.querySelectorAll(".mode-tab"));
 const panes = Array.from(document.querySelectorAll(".mode-pane"));
 const mediaForm = document.querySelector("#media-form");
@@ -148,7 +152,7 @@ async function startPurify() {
     hideResultCards();
     updateStatus("بدء إزالة المعازف", "تمت الموافقة. نبدأ تجهيز نسخة منقّاة بالصوت البشري قدر الإمكان.", 82);
     appendLog("تمت الموافقة على إزالة المعازف. يمكنك الاستغفار حتى يكتمل العمل.");
-    const response = await fetch(`/api/jobs/${currentJobId}/purify`, { method: "POST" });
+    const response = await fetch(`${API_BASE}/api/jobs/${currentJobId}/purify`, { method: "POST" });
     if (!response.ok) {
       throw new Error(await readError(response));
     }
@@ -172,7 +176,7 @@ retryButton.addEventListener("click", async () => {
     resetLog("نعيد المحاولة من الملف المحفوظ لتوفير وقت التحميل.");
     startElapsedTimer();
     updateStatus("إعادة المحاولة", "نستخدم الملف الموجود ونبدأ استخراج الصوت من جديد.", 3);
-    const response = await fetch(`/api/jobs/${currentJobId}/retry`, { method: "POST" });
+    const response = await fetch(`${API_BASE}/api/jobs/${currentJobId}/retry`, { method: "POST" });
     if (!response.ok) {
       throw new Error(await readError(response));
     }
@@ -262,7 +266,7 @@ checkHealth();
 
 async function checkHealth() {
   try {
-    const response = await fetch("/api/health", { cache: "no-store" });
+    const response = await fetch(`${API_BASE}/api/health`, { cache: "no-store" });
     if (!response.ok) {
       throw new Error("health failed");
     }
@@ -321,7 +325,7 @@ async function restoreLatestJob() {
     if (!savedJobId) {
       return;
     }
-    const response = await fetch(`/api/jobs/${savedJobId}`, { cache: "no-store" });
+    const response = await fetch(`${API_BASE}/api/jobs/${savedJobId}`, { cache: "no-store" });
     if (!response.ok) {
       return;
     }
@@ -347,7 +351,7 @@ async function createJob() {
     if (!linkDownloadsReliable && isYouTubeUrl(url)) {
       throw new Error("روابط YouTube لا تعمل بثبات على الاستضافة الحالية. نزّل الملف على جهازك ثم ارفعه من تبويب ملف.");
     }
-    const response = await fetch("/api/jobs/link", {
+    const response = await fetch(`${API_BASE}/api/jobs/link`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -380,7 +384,7 @@ async function createJob() {
     formData.append("file", recordedBlob, "recorded-voice.webm");
   }
 
-  const response = await fetch("/api/jobs/upload", {
+  const response = await fetch(`${API_BASE}/api/jobs/upload`, {
     method: "POST",
     body: formData
   });
@@ -399,7 +403,7 @@ function startPolling(jobId) {
 
 async function pollJob(jobId) {
   try {
-    const response = await fetch(`/api/jobs/${jobId}`, { cache: "no-store" });
+    const response = await fetch(`${API_BASE}/api/jobs/${jobId}`, { cache: "no-store" });
     if (!response.ok) {
       throw new Error(await readError(response));
     }
@@ -532,7 +536,7 @@ function setDownloadLink(anchor, url) {
     return;
   }
 
-  anchor.href = url;
+  anchor.href = url.startsWith("http") ? url : `${API_BASE}${url}`;
   anchor.classList.remove("is-disabled");
 }
 
