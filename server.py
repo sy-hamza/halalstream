@@ -40,6 +40,7 @@ DEMUCS_MODEL = os.getenv("HALALSTREAM_DEMUCS_MODEL", "htdemucs")
 DEMUCS_JOBS = int(os.getenv("HALALSTREAM_DEMUCS_JOBS", "1"))
 DEMUCS_SEGMENT = int(float(os.getenv("HALALSTREAM_DEMUCS_SEGMENT", "3")))
 DEMUCS_OVERLAP = float(os.getenv("HALALSTREAM_DEMUCS_OVERLAP", "0.1"))
+MAX_ACTIVE_PROCESSING_JOBS = max(1, int(os.getenv("HALALSTREAM_MAX_ACTIVE_PROCESSING_JOBS", "1")))
 HOSTED_SPACE = bool(os.getenv("SPACE_ID") or os.getenv("SPACE_HOST"))
 ALLOW_LINK_DOWNLOADS = os.getenv("HALALSTREAM_ALLOW_LINK_DOWNLOADS", "").strip().lower() in {"1", "true", "yes"}
 LINK_DOWNLOADS_RELIABLE = (not HOSTED_SPACE) or ALLOW_LINK_DOWNLOADS
@@ -60,6 +61,7 @@ YOUTUBE_REMOTE_COMPONENTS = tuple(
     for component in os.getenv("HALALSTREAM_YOUTUBE_REMOTE_COMPONENTS", "ejs:github").split(",")
     if component.strip()
 )
+YTDLP_PROXY = os.getenv("HALALSTREAM_YTDLP_PROXY", "").strip()
 
 ASSETS_DIR.mkdir(exist_ok=True)
 STORAGE.mkdir(exist_ok=True)
@@ -70,6 +72,7 @@ app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 
 jobs: Dict[str, Dict[str, Any]] = {}
 jobs_lock = threading.Lock()
+processing_semaphore = threading.BoundedSemaphore(MAX_ACTIVE_PROCESSING_JOBS)
 
 
 class LinkJobRequest(BaseModel):
@@ -103,8 +106,10 @@ def health() -> Dict[str, Any]:
         "demucs_jobs": DEMUCS_JOBS,
         "demucs_segment": DEMUCS_SEGMENT,
         "demucs_overlap": DEMUCS_OVERLAP,
+        "max_active_processing_jobs": MAX_ACTIVE_PROCESSING_JOBS,
         "hosted_space": HOSTED_SPACE,
         "link_downloads_reliable": LINK_DOWNLOADS_RELIABLE,
+        "yt_dlp_proxy": bool(YTDLP_PROXY),
         "youtube_pot_provider": bool(YOUTUBE_POT_BASE_URL),
         "youtube_fetch_pot": YOUTUBE_FETCH_POT,
         "youtube_remote_components": list(YOUTUBE_REMOTE_COMPONENTS),
@@ -276,6 +281,7 @@ def create_job(source_type: str, source_url: Optional[str] = None, source_name: 
 
 
 def process_job(job_id: str) -> None:
+    release_slot = acquire_processing_slot(job_id)
     try:
         ensure_runtime()
         job = get_internal_job(job_id)
@@ -329,6 +335,8 @@ def process_job(job_id: str) -> None:
         )
     except Exception as exc:
         fail_job(job_id, exc)
+    finally:
+        release_slot()
 
 
 def purify_job(job_id: str) -> None:
@@ -463,6 +471,8 @@ def build_ydl_options(workdir: Path, job_id: str, youtube_clients: tuple[str, ..
         },
         "progress_hooks": [lambda data: yt_progress_hook(job_id, data)],
     }
+    if YTDLP_PROXY:
+        ydl_opts["proxy"] = YTDLP_PROXY
     extractor_args: Dict[str, Dict[str, list[str]]] = {}
     youtube_args: Dict[str, list[str]] = {}
     if youtube_clients:
@@ -494,8 +504,12 @@ def cleanup_partial_downloads(workdir: Path) -> None:
 def youtube_download_error(errors: list[str]) -> str:
     last_error = errors[-1] if errors else "لم يصل تفصيل من yt-dlp."
     if "Sign in to confirm" in last_error or "not a bot" in last_error or "cookies" in last_error.lower():
+        if YTDLP_PROXY:
+            return (
+                "طلب YouTube إثبات أن الخادم ليس روبوتاً. ملف cookies أو البروكسي الحالي غير كافيين لهذا الرابط."
+            )
         return (
-            "طلب YouTube إثبات أن الخادم ليس روبوتاً. نحتاج ملف cookies من متصفحك لتفعيل تنزيل روابط YouTube على هذا الخادم."
+            "طلب YouTube إثبات أن الخادم ليس روبوتاً. نحتاج ملف cookies صالحاً وبروكسي نظيفاً لتفعيل تنزيل هذا الرابط بثبات."
         )
     if "UNEXPECTED_EOF_WHILE_READING" in last_error or "SSL" in last_error:
         return (
@@ -749,6 +763,23 @@ def start_worker(target, job_id: str) -> None:
     thread.start()
 
 
+def acquire_processing_slot(job_id: str):
+    if not processing_semaphore.acquire(blocking=False):
+        update_job(
+            job_id,
+            status="queued",
+            stage="في قائمة الانتظار",
+            progress=2,
+            message="الطلب محفوظ في قائمة الانتظار. سنبدأ المعالجة تلقائياً عندما يفرغ الخادم.",
+        )
+        processing_semaphore.acquire()
+
+    def release() -> None:
+        processing_semaphore.release()
+
+    return release
+
+
 def clear_generated_outputs(job_id: str) -> None:
     workdir = job_dir(job_id)
     for relative in [
@@ -860,8 +891,10 @@ def friendly_error(message: str) -> str:
         return "منع YouTube تنزيل هذا الرابط مؤقتاً. أعد المحاولة، وإن تكرر الخطأ فقد يحتاج الرابط إلى كوكيز المتصفح أو طريقة تحميل مختلفة."
     if "UNEXPECTED_EOF_WHILE_READING" in message or "SSL" in message:
         return "تعذر تنزيل الرابط من YouTube بسبب انقطاع اتصال الاستضافة. جرّب مرة أخرى أو ارفع الملف من جهازك عبر تبويب ملف."
-    if "Sign in to confirm" in message or "cookies" in message.lower():
-        return "هذا الرابط يحتاج تسجيل دخول أو كوكيز من المتصفح قبل أن يستطيع الخادم تحميله."
+    if "Sign in to confirm" in message or "not a bot" in message or "cookies" in message.lower():
+        if YTDLP_PROXY:
+            return "هذا الرابط يحتاج جلسة YouTube أقوى أو بروكسي أنظف قبل أن يستطيع الخادم تحميله."
+        return "هذا الرابط يحتاج جلسة YouTube وبروكسي نظيفاً قبل أن يستطيع الخادم تحميله."
     return message
 
 
