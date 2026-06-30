@@ -750,8 +750,10 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
         model,
         "-j",
         str(max(1, DEMUCS_JOBS)),
+        "--shifts",
+        "4",
         "--overlap",
-        str(max(0.0, DEMUCS_OVERLAP)),
+        "0.5",
         "-o",
         str(out_dir),
         str(audio),
@@ -796,13 +798,10 @@ def encode_audio(job_id: str, source_audio: Path, filename: str, progress: int, 
         "-vn",
     ]
     if filter_vocals:
-        # Super-aggressive vocal purification pipeline:
-        # 1) highpass=f=150 — cut bass/mid-bass leaks completely (vocals start higher)
-        # 2) lowpass=f=6000 — cut high-frequency cymbals/synths completely
-        # 3) afftdn=nf=-45 — FFT noise filter to kill background synth pads & reverb tail leakage
-        # 4) agate — fast-acting noise gate (threshold=0.04, near-absolute attenuation) to mute instrument gaps instantly
-        # 5) dynaudnorm — normalize speech levels
-        cmd.extend(["-af", "highpass=f=150,lowpass=f=6000,afftdn=nf=-45,agate=threshold=0.04:range=0.01:attack=10:release=120,dynaudnorm=g=5:p=0.71:m=10"])
+        # High-fidelity natural vocal presentation:
+        # 1) highpass=f=80 — cut sub-bass room rumble/low noise
+        # 2) dynaudnorm — balance vocal dynamics transparently
+        cmd.extend(["-af", "highpass=f=80,dynaudnorm=g=5:p=0.71:m=10"])
         
     cmd.extend([
         "-c:a",
