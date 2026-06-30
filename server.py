@@ -804,8 +804,7 @@ def encode_audio(job_id: str, source_audio: Path, filename: str, progress: int, 
     if filter_vocals:
         # High-fidelity natural vocal presentation:
         # 1) highpass=f=80 — cut sub-bass room rumble/low noise
-        # 2) dynaudnorm — balance vocal dynamics transparently
-        cmd.extend(["-af", "highpass=f=80,dynaudnorm=g=5:p=0.71:m=10"])
+        cmd.extend(["-af", "highpass=f=80"])
         
     cmd.extend([
         "-c:a",
