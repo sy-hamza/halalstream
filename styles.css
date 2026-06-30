@@ -882,6 +882,63 @@ audio {
   color: var(--rose);
 }
 
+.local-helper {
+  display: grid;
+  gap: 12px;
+  margin-top: 2px;
+  border: 1px solid rgba(8, 124, 114, 0.18);
+  border-radius: 8px;
+  padding: 16px;
+  color: var(--ink);
+  background:
+    linear-gradient(135deg, rgba(232, 248, 243, 0.96), rgba(255, 255, 255, 0.92)),
+    radial-gradient(circle at 14% 18%, rgba(182, 129, 52, 0.12), transparent 34%);
+  box-shadow: 0 14px 34px rgba(8, 124, 114, 0.08);
+  animation: reveal 240ms ease both;
+}
+
+.local-helper[hidden] {
+  display: none;
+}
+
+.local-helper h4 {
+  margin: 0;
+  color: var(--teal-dark);
+  font-size: clamp(1.05rem, 1.5vw, 1.22rem);
+  line-height: 1.55;
+}
+
+.local-helper p {
+  color: var(--muted);
+}
+
+.helper-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.local-helper textarea {
+  width: 100%;
+  min-height: 132px;
+  resize: vertical;
+  border: 1px solid rgba(18, 32, 30, 0.12);
+  border-radius: 8px;
+  padding: 12px;
+  color: #1f2d2b;
+  background: rgba(255, 255, 255, 0.86);
+  direction: ltr;
+  text-align: left;
+  line-height: 1.55;
+  outline: 0;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.local-helper textarea:focus-visible {
+  border-color: rgba(8, 124, 114, 0.5);
+  box-shadow: 0 0 0 4px rgba(8, 124, 114, 0.11);
+}
+
 .hadith {
   padding: 14px 16px;
   border-right: 4px solid var(--rose);
@@ -1041,6 +1098,7 @@ audio {
   .file-picker,
   .source-insights,
   .download-choice,
+  .helper-actions,
   .status-metrics {
     grid-template-columns: 1fr;
   }

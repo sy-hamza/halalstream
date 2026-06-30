@@ -222,6 +222,18 @@
               <p class="notice-kicker">تحتاج مراجعة</p>
               <h3>تعذرت المعالجة</h3>
               <p id="error-message"></p>
+              <div class="local-helper" id="local-helper" hidden>
+                <p class="notice-kicker">حل مجاني عند رفض YouTube</p>
+                <h4>نزّل المقطع محلياً ثم ارفعه هنا</h4>
+                <p>
+                  إذا رفض YouTube خادمنا، استخدم جهازك للتحميل لأن شبكتك ومتصفحك غالباً أوثق من عنوان الخادم. بعد نزول الملف اختره من تبويب ملف وابدأ الفحص.
+                </p>
+                <div class="helper-actions">
+                  <button class="secondary-button" id="copy-helper-command" type="button">نسخ أمر Windows</button>
+                  <button class="secondary-button" id="download-helper-script" type="button">تنزيل سكربت مساعد</button>
+                </div>
+                <textarea id="helper-command" rows="4" readonly></textarea>
+              </div>
               <button class="secondary-button retry-button" id="retry-button" type="button">إعادة المحاولة من الملف المحفوظ</button>
             </div>
           </div>

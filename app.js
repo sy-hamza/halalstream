@@ -25,6 +25,10 @@ const warningCard = document.querySelector("#warning-card");
 const completeCard = document.querySelector("#complete-card");
 const errorCard = document.querySelector("#error-card");
 const errorMessage = document.querySelector("#error-message");
+const localHelper = document.querySelector("#local-helper");
+const helperCommand = document.querySelector("#helper-command");
+const copyHelperCommand = document.querySelector("#copy-helper-command");
+const downloadHelperScript = document.querySelector("#download-helper-script");
 const cleanVideoDownload = document.querySelector("#clean-video-download");
 const cleanAudioDownload = document.querySelector("#clean-audio-download");
 const purifiedVideoDownload = document.querySelector("#purified-video-download");
@@ -153,6 +157,33 @@ retryButton.addEventListener("click", async () => {
     setBusy(false);
     showError(error.message || "تعذرت إعادة المحاولة.");
   }
+});
+
+copyHelperCommand.addEventListener("click", async () => {
+  if (!helperCommand.value) return;
+  try {
+    await navigator.clipboard.writeText(helperCommand.value);
+    copyHelperCommand.textContent = "تم النسخ";
+    window.setTimeout(() => {
+      copyHelperCommand.textContent = "نسخ أمر Windows";
+    }, 1800);
+  } catch (error) {
+    helperCommand.focus();
+    helperCommand.select();
+  }
+});
+
+downloadHelperScript.addEventListener("click", () => {
+  if (!helperCommand.value) return;
+  const blob = new Blob([helperCommand.value], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = "halalstream-local-download.ps1";
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 });
 
 recordButton.addEventListener("click", async () => {
@@ -375,6 +406,7 @@ function renderJob(job) {
 
   if (job.status === "failed") {
     errorMessage.textContent = job.message || "حدث خطأ غير متوقع أثناء المعالجة.";
+    renderLocalHelper(job);
     errorCard.hidden = false;
   }
 }
@@ -418,6 +450,7 @@ function hideResultCards() {
   warningCard.hidden = true;
   completeCard.hidden = true;
   errorCard.hidden = true;
+  localHelper.hidden = true;
   hideDecisionOverlay();
 }
 
@@ -520,6 +553,60 @@ function pickWaitingNote() {
 function isYouTubeUrl(url) {
   const lowered = url.toLowerCase();
   return lowered.includes("youtube.com") || lowered.includes("youtu.be");
+}
+
+function renderLocalHelper(job) {
+  localHelper.hidden = true;
+  helperCommand.value = "";
+
+  const url = job.source_url || mediaUrl.value.trim();
+  if (!url || !isYouTubeUrl(url) || !needsLocalDownload(job.message || "")) {
+    return;
+  }
+
+  helperCommand.value = buildWindowsLocalDownloader(url);
+  localHelper.hidden = false;
+}
+
+function needsLocalDownload(message) {
+  const text = message.toLowerCase();
+  return text.includes("youtube") || text.includes("كوكيز") || text.includes("بروكسي") || text.includes("جلسة");
+}
+
+function buildWindowsLocalDownloader(sourceUrl) {
+  const siteUrl = `${location.origin}/`;
+  const lines = [
+    "$ErrorActionPreference = 'Stop'",
+    "$dir = Join-Path $env:USERPROFILE 'Downloads\\HalalStream'",
+    "New-Item -ItemType Directory -Force -Path $dir | Out-Null",
+    "$tool = Join-Path $dir 'yt-dlp.exe'",
+    "if (!(Test-Path $tool)) {",
+    "  Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile $tool",
+    "}",
+    "$out = Join-Path $dir '%(title).120s-%(id)s.%(ext)s'",
+    `$url = ${toPowerShellSingleQuoted(sourceUrl)}`,
+    "$browsers = @('edge', 'chrome', 'firefox')",
+    "$done = $false",
+    "foreach ($browser in $browsers) {",
+    "  Write-Host \"نجرب التحميل عبر جلسة المتصفح: $browser\"",
+    "  & $tool --cookies-from-browser $browser -f \"bv*[height<=720]+ba/b[height<=720]/best\" --merge-output-format mp4 -o $out $url",
+    "  if ($LASTEXITCODE -eq 0) { $done = $true; break }",
+    "}",
+    "if (!$done) {",
+    "  Write-Host 'نجرب التحميل المباشر بدون كوكيز المتصفح.'",
+    "  & $tool -f \"bv*[height<=720]+ba/b[height<=720]/best\" --merge-output-format mp4 -o $out $url",
+    "  if ($LASTEXITCODE -eq 0) { $done = $true }",
+    "}",
+    "if (!$done) { throw 'تعذر التحميل المحلي أيضاً. افتح رابط YouTube في المتصفح مرة واحدة ثم أعد تشغيل السكربت.' }",
+    `Start-Process ${toPowerShellSingleQuoted(siteUrl)}`,
+    "Write-Host ''",
+    "Write-Host 'تم التحميل داخل مجلد Downloads\\HalalStream. ارجع للموقع واختر الملف من تبويب ملف.'"
+  ];
+  return lines.join("\n");
+}
+
+function toPowerShellSingleQuoted(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
 }
 
 function startElapsedTimer() {
