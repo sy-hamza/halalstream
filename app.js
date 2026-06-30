@@ -469,8 +469,15 @@ function renderJob(job) {
 
     // Auto-scroll to the warning card so the user notices the action on mobile
     window.setTimeout(() => {
-      warningCard.scrollIntoView({ behavior: "smooth", block: "center" });
-    }, 150);
+      const rect = warningCard.getBoundingClientRect();
+      const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+      window.scrollTo({
+        top: rect.top + scrollTop - 80,
+        behavior: "smooth"
+      });
+      // Add dynamic glowing attention highlight
+      warningCard.style.animation = "pulseGlow 1.5s ease-in-out infinite";
+    }, 450);
     return;
   }
 
@@ -531,6 +538,7 @@ function setStage(activeStep) {
 function hideResultCards() {
   cleanCard.hidden = true;
   warningCard.hidden = true;
+  warningCard.style.animation = "none";
   completeCard.hidden = true;
   errorCard.hidden = true;
   localHelper.hidden = true;
