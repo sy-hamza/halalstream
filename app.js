@@ -29,6 +29,7 @@ const localHelper = document.querySelector("#local-helper");
 const helperCommand = document.querySelector("#helper-command");
 const copyHelperCommand = document.querySelector("#copy-helper-command");
 const downloadHelperScript = document.querySelector("#download-helper-script");
+const uploadLocalFile = document.querySelector("#upload-local-file");
 const cleanVideoDownload = document.querySelector("#clean-video-download");
 const cleanAudioDownload = document.querySelector("#clean-audio-download");
 const purifiedVideoDownload = document.querySelector("#purified-video-download");
@@ -184,6 +185,12 @@ downloadHelperScript.addEventListener("click", () => {
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+});
+
+uploadLocalFile.addEventListener("click", () => {
+  setMode("file");
+  mediaForm.scrollIntoView({ behavior: "smooth", block: "center" });
+  window.setTimeout(() => mediaFile.click(), 260);
 });
 
 recordButton.addEventListener("click", async () => {
@@ -565,6 +572,7 @@ function renderLocalHelper(job) {
   }
 
   helperCommand.value = buildWindowsLocalDownloader(url);
+  helperCommand.scrollTop = 0;
   localHelper.hidden = false;
 }
 

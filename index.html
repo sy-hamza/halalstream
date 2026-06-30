@@ -226,13 +226,22 @@
                 <p class="notice-kicker">حل مجاني عند رفض YouTube</p>
                 <h4>نزّل المقطع محلياً ثم ارفعه هنا</h4>
                 <p>
-                  إذا رفض YouTube خادمنا، استخدم جهازك للتحميل لأن شبكتك ومتصفحك غالباً أوثق من عنوان الخادم. بعد نزول الملف اختره من تبويب ملف وابدأ الفحص.
+                  YouTube أحياناً يثق بجهازك ومتصفحك أكثر من عنوان الخادم. المساعد الصغير ينزّل المقطع على جهازك فقط، ثم ترفعه هنا لإزالة المعازف.
                 </p>
+                <ol class="helper-steps">
+                  <li>نزّل السكربت المساعد وشغّله على Windows.</li>
+                  <li>سيحفظ الملف داخل مجلد Downloads\HalalStream.</li>
+                  <li>ارجع للموقع وارفع الملف من تبويب ملف.</li>
+                </ol>
                 <div class="helper-actions">
-                  <button class="secondary-button" id="copy-helper-command" type="button">نسخ أمر Windows</button>
-                  <button class="secondary-button" id="download-helper-script" type="button">تنزيل سكربت مساعد</button>
+                  <button class="primary-button" id="download-helper-script" type="button">تنزيل المساعد</button>
+                  <button class="secondary-button" id="upload-local-file" type="button">رفع الملف بعد التحميل</button>
                 </div>
-                <textarea id="helper-command" rows="4" readonly></textarea>
+                <details class="helper-advanced">
+                  <summary>عرض أمر Windows للمستخدم المتقدم</summary>
+                  <button class="secondary-button" id="copy-helper-command" type="button">نسخ الأمر</button>
+                  <textarea id="helper-command" rows="4" readonly></textarea>
+                </details>
               </div>
               <button class="secondary-button retry-button" id="retry-button" type="button">إعادة المحاولة من الملف المحفوظ</button>
             </div>

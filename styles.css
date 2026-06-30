@@ -912,15 +912,74 @@ audio {
   color: var(--muted);
 }
 
+.helper-steps {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: helper-step;
+}
+
+.helper-steps li {
+  position: relative;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(8, 124, 114, 0.12);
+  border-radius: 8px;
+  padding: 9px 12px;
+  color: var(--teal-dark);
+  background: rgba(255, 255, 255, 0.68);
+  font-weight: 800;
+  line-height: 1.6;
+}
+
+.helper-steps li::before {
+  counter-increment: helper-step;
+  content: counter(helper-step);
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: #fff;
+  background: linear-gradient(135deg, var(--teal), var(--teal-dark));
+  font-size: 0.86rem;
+  box-shadow: 0 8px 18px rgba(8, 124, 114, 0.18);
+}
+
 .helper-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
 
+.helper-advanced {
+  border: 1px solid rgba(18, 32, 30, 0.1);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.helper-advanced summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-weight: 800;
+  line-height: 1.7;
+}
+
+.helper-advanced .secondary-button {
+  width: 100%;
+  margin: 10px 0;
+}
+
 .local-helper textarea {
   width: 100%;
-  min-height: 132px;
+  min-height: 120px;
   resize: vertical;
   border: 1px solid rgba(18, 32, 30, 0.12);
   border-radius: 8px;
