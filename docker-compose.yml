@@ -1,4 +1,17 @@
 services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - halalstream
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
   youtube-pot:
     image: brainicism/bgutil-ytdlp-pot-provider:latest
     restart: unless-stopped
@@ -29,3 +42,5 @@ services:
 
 volumes:
   halalstream-storage:
+  caddy-data:
+  caddy-config:

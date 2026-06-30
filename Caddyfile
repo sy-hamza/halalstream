@@ -1,0 +1,4 @@
+165.22.71.86.sslip.io {
+  encode zstd gzip
+  reverse_proxy halalstream:8000
+}
