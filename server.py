@@ -49,6 +49,10 @@ YOUTUBE_CLIENT_FALLBACKS = tuple(
 YOUTUBE_SOCKET_TIMEOUT = int(os.getenv("HALALSTREAM_YOUTUBE_SOCKET_TIMEOUT", "12"))
 YOUTUBE_RETRIES = int(os.getenv("HALALSTREAM_YOUTUBE_RETRIES", "1"))
 YTDLP_COOKIES = os.getenv("HALALSTREAM_YTDLP_COOKIES", "").strip()
+YOUTUBE_POT_BASE_URL = os.getenv("HALALSTREAM_YOUTUBE_POT_BASE_URL", "").strip()
+YOUTUBE_FETCH_POT = os.getenv("HALALSTREAM_YOUTUBE_FETCH_POT", "auto").strip().lower()
+if YOUTUBE_FETCH_POT not in {"auto", "always", "never"}:
+    YOUTUBE_FETCH_POT = "auto"
 
 ASSETS_DIR.mkdir(exist_ok=True)
 STORAGE.mkdir(exist_ok=True)
@@ -92,6 +96,8 @@ def health() -> Dict[str, Any]:
         "demucs_jobs": DEMUCS_JOBS,
         "hosted_space": HOSTED_SPACE,
         "link_downloads_reliable": LINK_DOWNLOADS_RELIABLE,
+        "youtube_pot_provider": bool(YOUTUBE_POT_BASE_URL),
+        "youtube_fetch_pot": YOUTUBE_FETCH_POT,
         "message": "الخادم يعمل. اكتمال المعالجة يحتاج yt-dlp و ffmpeg و demucs.",
     }
 
@@ -446,8 +452,18 @@ def build_ydl_options(workdir: Path, job_id: str, youtube_clients: tuple[str, ..
         },
         "progress_hooks": [lambda data: yt_progress_hook(job_id, data)],
     }
+    extractor_args: Dict[str, Dict[str, list[str]]] = {}
+    youtube_args: Dict[str, list[str]] = {}
     if youtube_clients:
-        ydl_opts["extractor_args"] = {"youtube": {"player_client": list(youtube_clients)}}
+        youtube_args["player_client"] = list(youtube_clients)
+    if YOUTUBE_FETCH_POT:
+        youtube_args["fetch_pot"] = [YOUTUBE_FETCH_POT]
+    if youtube_args:
+        extractor_args["youtube"] = youtube_args
+    if YOUTUBE_POT_BASE_URL:
+        extractor_args["youtubepot-bgutilhttp"] = {"base_url": [YOUTUBE_POT_BASE_URL]}
+    if extractor_args:
+        ydl_opts["extractor_args"] = extractor_args
     if YTDLP_COOKIES:
         cookie_path = Path(YTDLP_COOKIES)
         if cookie_path.exists():

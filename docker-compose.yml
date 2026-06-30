@@ -1,7 +1,13 @@
 services:
+  youtube-pot:
+    image: brainicism/bgutil-ytdlp-pot-provider:latest
+    restart: unless-stopped
+
   halalstream:
     build: .
     restart: unless-stopped
+    depends_on:
+      - youtube-pot
     ports:
       - "8000:8000"
     environment:
@@ -10,11 +16,13 @@ services:
       HALALSTREAM_YOUTUBE_RETRIES: "2"
       HALALSTREAM_YOUTUBE_SOCKET_TIMEOUT: "20"
       HALALSTREAM_ALLOW_LINK_DOWNLOADS: "true"
+      HALALSTREAM_YOUTUBE_POT_BASE_URL: http://youtube-pot:4416
+      HALALSTREAM_YOUTUBE_FETCH_POT: always
       # Optional: export YouTube cookies from your browser when YouTube requires login.
       # HALALSTREAM_YTDLP_COOKIES: /home/user/app/secrets/cookies.txt
     volumes:
       - halalstream-storage:/home/user/app/storage
-      - ./secrets:/home/user/app/secrets:ro
+      - ./secrets:/home/user/app/secrets
 
 volumes:
   halalstream-storage:
