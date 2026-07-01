@@ -23,6 +23,8 @@ DEMUCS_SHIFTS = max(1, int(os.getenv("HALALSTREAM_DEMUCS_SHIFTS", "4")))
 MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_MUSIC_RATIO_THRESHOLD", "0.04"))
 RESIDUAL_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_RESIDUAL_MUSIC_RATIO_THRESHOLD", "0.12"))
 RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD = float(os.getenv("HALALSTREAM_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD", "0.01"))
+VOICELESS_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_VOICELESS_MUSIC_RATIO_THRESHOLD", "0.92"))
+STRICT_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_STRICT_MUSIC_RATIO_THRESHOLD", "0.45"))
 
 image = (
     modal.Image.from_registry(
@@ -86,7 +88,10 @@ async def purify(
                 "audio_base64": base64.b64encode(clean_audio.read_bytes()).decode("ascii"),
             }
 
-        result = purify_with_retries(workdir, vocals, instrumental)
+        if is_voiceless_music(ratio):
+            result = silence_result_for_voiceless_music(workdir, audio)
+        else:
+            result = purify_with_retries(workdir, vocals, instrumental, source_ratio=ratio)
         purified_audio = encode_audio(workdir, result["path"], "purified-audio.m4a", filter_vocals=True)
         return {
             "status": "complete",
@@ -221,8 +226,46 @@ def rms_wav(path: Path) -> float:
     return math.sqrt(total_square / total_samples) if total_samples else 0.0
 
 
-def purify_with_retries(workdir: Path, vocals_path: Path, instrumental_path: Path) -> Dict[str, Any]:
+def is_voiceless_music(ratio: float) -> bool:
+    return ratio >= VOICELESS_MUSIC_RATIO_THRESHOLD
+
+
+def silence_result_for_voiceless_music(workdir: Path, reference_audio: Path) -> Dict[str, Any]:
+    out = write_silence_like(reference_audio, workdir / "vocals_silenced_no_voice.wav")
+    return {
+        "path": out,
+        "mode": "silence_no_voice",
+        "ratio": 0.0,
+        "absolute": 0.0,
+        "safe": True,
+        "voiceless": True,
+    }
+
+
+def write_silence_like(reference_audio: Path, out: Path) -> Path:
+    import numpy as np
+    import soundfile as sf
+
+    with sf.SoundFile(str(reference_audio), "r") as source:
+        with sf.SoundFile(
+            str(out),
+            "w",
+            samplerate=source.samplerate,
+            channels=source.channels,
+            subtype="PCM_16",
+        ) as target:
+            remaining = len(source)
+            block_size = 65536
+            while remaining > 0:
+                frames = min(block_size, remaining)
+                target.write(np.zeros((frames, source.channels), dtype=np.float32))
+                remaining -= frames
+    return out
+
+
+def purify_with_retries(workdir: Path, vocals_path: Path, instrumental_path: Path, source_ratio: float = 0.0) -> Dict[str, Any]:
     best: Optional[Dict[str, Any]] = None
+    strict_source = source_ratio >= STRICT_MUSIC_RATIO_THRESHOLD
     for mode in ["balanced", "strong", "extreme"]:
         candidate = purify_vocal_stem(vocals_path, instrumental_path, workdir, mode)
         ratio, absolute = estimate_residual_music_bleed(candidate, instrumental_path)
@@ -235,13 +278,15 @@ def purify_with_retries(workdir: Path, vocals_path: Path, instrumental_path: Pat
         }
         if best is None or ratio < best["ratio"]:
             best = result
-        if result["safe"]:
+        if result["safe"] and not strict_source:
             return result
     assert best is not None
     return best
 
 
 def completion_message(result: Dict[str, Any]) -> str:
+    if result.get("voiceless"):
+        return "لم نجد صوتاً بشرياً موثوقاً بعد عزل المعازف، لذلك أخرجنا مساراً صامتاً بدل تمرير الموسيقى."
     if result.get("safe"):
         return "تم بحمد الله إعداد نسخة منقّاة عبر عامل Modal. الملف جاهز للتحميل."
     return "اكتملت أقوى محاولة تنقية متاحة عبر Modal. قد يتأثر الصوت البشري، لكننا أعدنا المحاولة لتقليل بقايا المعازف قدر الإمكان."
@@ -462,7 +507,8 @@ def estimate_residual_music_bleed(purified_vocals: Path, instrumental_path: Path
     clean_mag = np.abs(clean_spec).astype(np.float32)
     inst_mag = np.abs(inst_spec).astype(np.float32)
     ratio = float(np.sum(np.minimum(clean_mag, inst_mag)) / max(np.sum(clean_mag), 1e-8))
-    absolute = float(np.sqrt(np.mean(np.square(clean))))
+    clean_rms = float(np.sqrt(np.mean(np.square(clean))))
+    absolute = clean_rms * ratio
     return ratio, absolute
 
 

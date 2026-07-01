@@ -72,6 +72,8 @@ COBALT_DOWNLOAD_TIMEOUT = max(10, int(os.getenv("HALALSTREAM_COBALT_DOWNLOAD_TIM
 VERIFY_PURIFIED_OUTPUT = os.getenv("HALALSTREAM_VERIFY_PURIFIED_OUTPUT", "1").strip().lower() in {"1", "true", "yes"}
 RESIDUAL_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_RESIDUAL_MUSIC_RATIO_THRESHOLD", "0.12"))
 RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD = float(os.getenv("HALALSTREAM_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD", "0.01"))
+VOICELESS_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_VOICELESS_MUSIC_RATIO_THRESHOLD", "0.92"))
+STRICT_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_STRICT_MUSIC_RATIO_THRESHOLD", "0.45"))
 MODAL_PURIFY_URL = os.getenv("HALALSTREAM_MODAL_PURIFY_URL", "").strip()
 MODAL_PURIFY_SECRET = os.getenv("HALALSTREAM_MODAL_SECRET", "").strip()
 MODAL_PURIFY_TIMEOUT = max(300, int(os.getenv("HALALSTREAM_MODAL_PURIFY_TIMEOUT", "1800")))
@@ -186,6 +188,8 @@ def health() -> Dict[str, Any]:
         "cobalt_parallelism": COBALT_PARALLELISM,
         "verify_purified_output": VERIFY_PURIFIED_OUTPUT,
         "residual_music_ratio_threshold": RESIDUAL_MUSIC_RATIO_THRESHOLD,
+        "voiceless_music_ratio_threshold": VOICELESS_MUSIC_RATIO_THRESHOLD,
+        "strict_music_ratio_threshold": STRICT_MUSIC_RATIO_THRESHOLD,
         "modal_purify_enabled": bool(MODAL_PURIFY_URL and MODAL_PURIFY_SECRET and requests is not None),
         "modal_purify_url_configured": bool(MODAL_PURIFY_URL),
         "max_active_processing_jobs": MAX_ACTIVE_PROCESSING_JOBS,
@@ -697,8 +701,19 @@ def purify_job(job_id: str) -> None:
         instrumental = Path(job["instrumental_path"]) if job.get("instrumental_path") else None
         purification_result = None
         if instrumental and instrumental.exists():
-            update_job(job_id, progress=84, message="نزيل بقايا المعازف من مسار الكلام مع الحفاظ على وضوح الصوت.")
-            purification_result = purify_with_retries(job_id, vocals, instrumental)
+            source_ratio = float(job.get("instrumental_ratio") or 0.0)
+            if is_voiceless_music(source_ratio):
+                update_job(
+                    job_id,
+                    progress=84,
+                    message="المقطع يغلب عليه العزف ولا يظهر صوت بشري موثوق. نخرج مساراً صامتاً بدل تمرير المعازف.",
+                    purification_mode="silence_no_voice",
+                )
+                reference_audio = Path(job["audio_path"]) if job.get("audio_path") else vocals
+                purification_result = silence_result_for_voiceless_music(job_id, reference_audio)
+            else:
+                update_job(job_id, progress=84, message="نزيل بقايا المعازف من مسار الكلام مع الحفاظ على وضوح الصوت.")
+                purification_result = purify_with_retries(job_id, vocals, instrumental, source_ratio=source_ratio)
             purified_vocals = purification_result["path"]
         else:
             purified_vocals = vocals
@@ -1059,9 +1074,50 @@ def find_demucs_stems(out_dir: Path, stem_name: str, model_name: str = None) -> 
     return vocals, instrumental
 
 
-def purify_with_retries(job_id: str, vocals_path: Path, instrumental_path: Path) -> Dict[str, Any]:
+def is_voiceless_music(ratio: float) -> bool:
+    return ratio >= VOICELESS_MUSIC_RATIO_THRESHOLD
+
+
+def silence_result_for_voiceless_music(job_id: str, reference_audio: Path) -> Dict[str, Any]:
+    out = write_silence_like(reference_audio, job_dir(job_id) / "vocals_silenced_no_voice.wav")
+    return {
+        "path": out,
+        "mode": "silence_no_voice",
+        "ratio": 0.0,
+        "absolute": 0.0,
+        "safe": True,
+        "voiceless": True,
+    }
+
+
+def write_silence_like(reference_audio: Path, out: Path) -> Path:
+    try:
+        import numpy as np
+        import soundfile as sf
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("تنقص مكتبات تجهيز مسار الصمت: numpy و soundfile.") from exc
+
+    with sf.SoundFile(str(reference_audio), "r") as source:
+        with sf.SoundFile(
+            str(out),
+            "w",
+            samplerate=source.samplerate,
+            channels=source.channels,
+            subtype="PCM_16",
+        ) as target:
+            remaining = len(source)
+            block_size = 65536
+            while remaining > 0:
+                frames = min(block_size, remaining)
+                target.write(np.zeros((frames, source.channels), dtype=np.float32))
+                remaining -= frames
+    return out
+
+
+def purify_with_retries(job_id: str, vocals_path: Path, instrumental_path: Path, source_ratio: float = 0.0) -> Dict[str, Any]:
     modes = ["balanced", "strong", "extreme"] if VERIFY_PURIFIED_OUTPUT else ["balanced"]
     best: Optional[Dict[str, Any]] = None
+    strict_source = source_ratio >= STRICT_MUSIC_RATIO_THRESHOLD
     for index, mode in enumerate(modes):
         profile = purification_profile(mode)
         update_job(
@@ -1082,7 +1138,7 @@ def purify_with_retries(job_id: str, vocals_path: Path, instrumental_path: Path)
         if best is None or ratio < best["ratio"]:
             best = result
         update_job(job_id, residual_music_ratio=round(ratio, 4), purification_mode=mode)
-        if result["safe"]:
+        if result["safe"] and not strict_source:
             return result
         if index < len(modes) - 1:
             update_job(
@@ -1102,6 +1158,8 @@ def purify_with_retries(job_id: str, vocals_path: Path, instrumental_path: Path)
 def completion_message(purification_result: Optional[Dict[str, Any]]) -> str:
     if not purification_result:
         return "تم بحمد الله عزل مسار المعازف وإعداد نسخة منقّاة قدر الإمكان. الملف جاهز للتحميل."
+    if purification_result.get("voiceless"):
+        return "لم نجد صوتاً بشرياً موثوقاً بعد عزل المعازف، لذلك أخرجنا مساراً صامتاً بدل تمرير الموسيقى."
     if purification_result.get("safe"):
         return "تم بحمد الله عزل مسار المعازف وإعداد نسخة منقّاة قدر الإمكان. الملف جاهز للتحميل."
     return "اكتملت أقوى محاولة تنقية متاحة. قد يتأثر الصوت البشري، لكننا أعدنا المحاولة لتقليل بقايا المعازف قدر الإمكان."
@@ -1418,7 +1476,8 @@ def estimate_residual_music_bleed(purified_vocals: Path, instrumental_path: Path
     inst_mag = np.abs(inst_spec).astype(np.float32)
     shared = np.minimum(clean_mag, inst_mag)
     ratio = float(np.sum(shared) / max(np.sum(clean_mag), 1e-8))
-    absolute = float(np.sqrt(np.mean(np.square(clean))))
+    clean_rms = float(np.sqrt(np.mean(np.square(clean))))
+    absolute = clean_rms * ratio
     return ratio, absolute
 
 
