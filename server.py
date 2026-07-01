@@ -54,7 +54,11 @@ MAX_ACTIVE_PROCESSING_JOBS = max(1, int(os.getenv("HALALSTREAM_MAX_ACTIVE_PROCES
 MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_MUSIC_RATIO_THRESHOLD", "0.04"))
 MUSIC_ABSOLUTE_RMS_THRESHOLD = float(os.getenv("HALALSTREAM_MUSIC_ABSOLUTE_RMS_THRESHOLD", "0.006"))
 DEMUCS_SHIFTS = max(1, int(os.getenv("HALALSTREAM_DEMUCS_SHIFTS", "4" if HAS_GPU else "2")))
-ALLOW_UNCHECKED_DIRECT = os.getenv("HALALSTREAM_ALLOW_UNCHECKED_DIRECT", "").strip().lower() in {"1", "true", "yes"}
+ALLOW_UNCHECKED_DIRECT = os.getenv("HALALSTREAM_ALLOW_UNCHECKED_DIRECT", "1").strip().lower() in {"1", "true", "yes"}
+AUTO_PURIFY_ON_DETECTION = os.getenv("HALALSTREAM_AUTO_PURIFY_ON_DETECTION", "1").strip().lower() in {"1", "true", "yes"}
+ESTIMATED_PROCESSING_SECONDS = max(60, int(os.getenv("HALALSTREAM_ESTIMATED_PROCESSING_SECONDS", "240")))
+JOB_TTL_HOURS = max(1.0, float(os.getenv("HALALSTREAM_JOB_TTL_HOURS", "12")))
+CLEANUP_INTERVAL_SECONDS = max(300, int(os.getenv("HALALSTREAM_CLEANUP_INTERVAL_SECONDS", "1800")))
 HOSTED_SPACE = bool(os.getenv("SPACE_ID") or os.getenv("SPACE_HOST"))
 ALLOW_LINK_DOWNLOADS = os.getenv("HALALSTREAM_ALLOW_LINK_DOWNLOADS", "").strip().lower() in {"1", "true", "yes"}
 LINK_DOWNLOADS_RELIABLE = True
@@ -113,6 +117,9 @@ app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 jobs: Dict[str, Dict[str, Any]] = {}
 jobs_lock = threading.Lock()
 processing_semaphore = threading.BoundedSemaphore(MAX_ACTIVE_PROCESSING_JOBS)
+queue_lock = threading.Lock()
+waiting_processing_jobs: list[str] = []
+active_processing_jobs: set[str] = set()
 
 
 class LinkJobRequest(BaseModel):
@@ -138,6 +145,9 @@ def styles() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
+    with queue_lock:
+        waiting_count = len(waiting_processing_jobs)
+        active_count = len(active_processing_jobs)
     return {
         "ok": True,
         "python": sys.version.split()[0],
@@ -152,6 +162,11 @@ def health() -> Dict[str, Any]:
         "demucs_overlap": DEMUCS_OVERLAP,
         "music_ratio_threshold": MUSIC_RATIO_THRESHOLD,
         "strict_direct_bypass": not ALLOW_UNCHECKED_DIRECT,
+        "auto_purify_on_detection": AUTO_PURIFY_ON_DETECTION,
+        "active_processing_jobs": active_count,
+        "waiting_processing_jobs": waiting_count,
+        "estimated_processing_seconds": ESTIMATED_PROCESSING_SECONDS,
+        "job_ttl_hours": JOB_TTL_HOURS,
         "max_active_processing_jobs": MAX_ACTIVE_PROCESSING_JOBS,
         "cuda_available": (lambda: __import__("torch").cuda.is_available() if has_module("torch") else False)(),
         "hosted_space": HOSTED_SPACE,
@@ -282,10 +297,11 @@ def download(job_id: str, kind: str = "purified") -> FileResponse:
         raise HTTPException(status_code=404, detail="لم يتم العثور على المهمة.")
 
     if kind == "original":
-        if job["status"] != "clean":
-            raise HTTPException(status_code=403, detail="لا يسمح بتحميل الملف الأصلي إلا بعد ثبوت خلوه من المعازف.")
+        if job["status"] not in {"clean", "direct"}:
+            raise HTTPException(status_code=403, detail="لا يسمح بتحميل الملف الأصلي إلا بعد ثبوت خلوه من المعازف أو اختيار التحميل المباشر.")
         path = job.get("original_path")
-        filename = f"halalstream-clean-{job_id}{Path(path).suffix if path else '.mp4'}"
+        prefix = "halalstream-direct" if job["status"] == "direct" else "halalstream-clean"
+        filename = f"{prefix}-{job_id}{Path(path).suffix if path else '.mp4'}"
     elif kind == "clean_audio":
         if job["status"] != "clean":
             raise HTTPException(status_code=403, detail="الصوت النظيف غير متاح إلا بعد ثبوت خلو المقطع من المعازف.")
@@ -344,6 +360,9 @@ def create_job(
         "purified_path": None,
         "purified_audio_path": None,
         "clean_audio_path": None,
+        "queue_position": 0,
+        "queue_length": 0,
+        "estimated_wait_seconds": 0,
         "error": None,
     }
     with jobs_lock:
@@ -353,42 +372,27 @@ def create_job(
 
 
 def process_job(job_id: str) -> None:
-    release_slot = acquire_processing_slot(job_id)
+    release_slot = None
     try:
-        ensure_runtime()
         job = get_internal_job(job_id)
         if not job:
             return
-
-        if job["source_type"] == "link":
-            existing_original = job.get("original_path")
-            if existing_original and Path(existing_original).exists():
-                original = Path(existing_original)
-                update_job(job_id, status="extracting", stage="استخراج الصوت", progress=24, message="نستخدم الملف الموجود ونستخرج الصوت من جديد.")
-            else:
-                original = download_link(job_id, job["source_url"])
-        else:
-            original = Path(job["original_path"])
-            update_job(job_id, status="extracting", stage="استخراج الصوت", progress=24, message="نجهز الملف للتحليل.")
-
         purify_mode = job.get("purify_mode", "purify")
-        quality = job.get("quality", "high")
 
-        if purify_mode == "direct" and ALLOW_UNCHECKED_DIRECT:
-            # Optional legacy bypass. Disabled by default so the server never
-            # releases unchecked media in the normal Islamic-safety flow.
-            update_job(
-                job_id,
-                status="clean",
-                stage="جاهز للتحميل",
-                progress=100,
-                message="الحمد لله، تم التجهيز للتحميل المباشر فوراً بناءً على تأكيدك بخلو المقطع من أي معازف.",
-                has_music=False,
-                instrumental_ratio=0.0,
-                confidence=1.0,
-                clean_audio_path=str(original),
-            )
+        if purify_mode == "direct":
+            if not ALLOW_UNCHECKED_DIRECT:
+                raise RuntimeError("التحميل المباشر غير مفعّل حالياً على الخادم.")
+            original = prepare_original(job_id, job, for_direct=True)
+            complete_direct_job(job_id, original)
             return
+
+        ensure_runtime()
+        original = prepare_original(job_id, job)
+
+        release_slot = acquire_processing_slot(job_id)
+        update_job(job_id, queue_position=0, queue_length=0, estimated_wait_seconds=0)
+
+        quality = job.get("quality", "high")
 
         audio = extract_audio(job_id, original)
         vocals, instrumental = separate_vocals(job_id, audio, quality=quality)
@@ -398,16 +402,22 @@ def process_job(job_id: str) -> None:
         if has_music:
             update_job(
                 job_id,
-                status="needs_consent",
-                stage="الحكم الشرعي قبل التحميل",
-                progress=78,
-                message="تم رصد مسار معازف. أوقفنا التحميل حتى توافق على إزالته.",
+                status="purifying" if AUTO_PURIFY_ON_DETECTION else "needs_consent",
+                stage="إزالة المعازف" if AUTO_PURIFY_ON_DETECTION else "الحكم الشرعي قبل التحميل",
+                progress=80 if AUTO_PURIFY_ON_DETECTION else 78,
+                message=(
+                    "تم رصد مسار معازف. نبدأ إزالة المعازف تلقائياً ولا نطلق الملف الأصلي."
+                    if AUTO_PURIFY_ON_DETECTION
+                    else "تم رصد مسار معازف. أوقفنا التحميل حتى توافق على إزالته."
+                ),
                 has_music=True,
                 instrumental_ratio=round(ratio, 4),
                 confidence=round(confidence, 4),
                 vocals_path=str(vocals),
                 instrumental_path=str(instrumental),
             )
+            if AUTO_PURIFY_ON_DETECTION:
+                purify_job(job_id)
             return
 
         clean_audio = encode_audio(job_id, audio, "clean-audio.m4a", 92, "نجهز نسخة صوتية نظيفة للتحميل.")
@@ -427,8 +437,57 @@ def process_job(job_id: str) -> None:
     except Exception as exc:
         fail_job(job_id, exc)
     finally:
-        release_slot()
+        if release_slot:
+            release_slot()
 
+
+def prepare_original(job_id: str, job: Dict[str, Any], for_direct: bool = False) -> Path:
+    if job["source_type"] == "link":
+        existing_original = job.get("original_path")
+        if existing_original and Path(existing_original).exists():
+            original = Path(existing_original)
+            update_job(
+                job_id,
+                status="downloading" if for_direct else "extracting",
+                stage="تجهيز التحميل" if for_direct else "استخراج الصوت",
+                progress=80 if for_direct else 24,
+                message="نستخدم الملف الموجود ونجهزه للتحميل المباشر." if for_direct else "نستخدم الملف الموجود ونستخرج الصوت من جديد.",
+            )
+        else:
+            original = download_link(job_id, job["source_url"])
+    else:
+        original = Path(job["original_path"])
+        update_job(
+            job_id,
+            status="downloading" if for_direct else "extracting",
+            stage="تجهيز التحميل" if for_direct else "استخراج الصوت",
+            progress=80 if for_direct else 24,
+            message="نجهز الملف للتحميل المباشر دون فحص." if for_direct else "نجهز الملف للتحليل.",
+        )
+    return original
+
+
+def complete_direct_job(job_id: str, original: Path) -> None:
+    update_job(
+        job_id,
+        status="direct",
+        stage="جاهز للتحميل",
+        progress=100,
+        message="تم تجهيز الملف للتحميل المباشر كما هو، دون فحص أو تنقية.",
+        has_music=None,
+        instrumental_ratio=None,
+        confidence=None,
+        original_path=str(original),
+        audio_path=None,
+        vocals_path=None,
+        instrumental_path=None,
+        clean_audio_path=None,
+        purified_path=None,
+        purified_audio_path=None,
+        queue_position=0,
+        queue_length=0,
+        estimated_wait_seconds=0,
+    )
 
 def purify_job(job_id: str) -> None:
     try:
@@ -1218,19 +1277,44 @@ def start_worker(target, job_id: str) -> None:
 
 def acquire_processing_slot(job_id: str):
     if not processing_semaphore.acquire(blocking=False):
-        update_job(
-            job_id,
-            status="queued",
-            stage="في قائمة الانتظار",
-            progress=2,
-            message="الطلب محفوظ في قائمة الانتظار. سنبدأ المعالجة تلقائياً عندما يفرغ الخادم.",
-        )
-        processing_semaphore.acquire()
+        with queue_lock:
+            if job_id not in waiting_processing_jobs:
+                waiting_processing_jobs.append(job_id)
+        while True:
+            update_queue_status(job_id)
+            if processing_semaphore.acquire(timeout=3):
+                break
+    with queue_lock:
+        if job_id in waiting_processing_jobs:
+            waiting_processing_jobs.remove(job_id)
+        active_processing_jobs.add(job_id)
 
     def release() -> None:
+        with queue_lock:
+            active_processing_jobs.discard(job_id)
         processing_semaphore.release()
 
     return release
+
+
+def update_queue_status(job_id: str) -> None:
+    with queue_lock:
+        try:
+            position = waiting_processing_jobs.index(job_id) + 1
+        except ValueError:
+            position = 1
+        queue_length = len(waiting_processing_jobs)
+    estimate = max(0, position * ESTIMATED_PROCESSING_SECONDS)
+    update_job(
+        job_id,
+        status="queued",
+        stage="في قائمة الانتظار",
+        progress=2,
+        message=f"دورك في طابور العزل رقم {position}. سنبدأ تلقائياً عندما يفرغ خادم المعالجة.",
+        queue_position=position,
+        queue_length=queue_length,
+        estimated_wait_seconds=estimate,
+    )
 
 
 def clear_generated_outputs(job_id: str) -> None:
@@ -1248,6 +1332,46 @@ def clear_generated_outputs(job_id: str) -> None:
                 shutil.rmtree(path)
             else:
                 path.unlink()
+
+
+def cleanup_expired_jobs() -> int:
+    now = time.time()
+    ttl_seconds = JOB_TTL_HOURS * 3600
+    active_statuses = {"queued", "downloading", "extracting", "separating", "analyzing", "purifying"}
+    expired_ids: list[str] = []
+    with jobs_lock:
+        for job_id, job in list(jobs.items()):
+            if job.get("status") in active_statuses:
+                continue
+            updated_at = float(job.get("updated_at") or job.get("created_at") or now)
+            if now - updated_at >= ttl_seconds:
+                expired_ids.append(job_id)
+        for job_id in expired_ids:
+            jobs.pop(job_id, None)
+
+    for job_id in expired_ids:
+        with queue_lock:
+            if job_id in waiting_processing_jobs:
+                waiting_processing_jobs.remove(job_id)
+            active_processing_jobs.discard(job_id)
+        path = job_dir(job_id).resolve()
+        try:
+            if path.parent == JOBS_DIR and path.exists():
+                shutil.rmtree(path)
+        except OSError:
+            pass
+    return len(expired_ids)
+
+
+def cleanup_expired_jobs_loop() -> None:
+    while True:
+        time.sleep(CLEANUP_INTERVAL_SECONDS)
+        cleanup_expired_jobs()
+
+
+def start_cleanup_worker() -> None:
+    thread = threading.Thread(target=cleanup_expired_jobs_loop, daemon=True)
+    thread.start()
 
 
 def job_dir(job_id: str) -> Path:
@@ -1288,14 +1412,14 @@ def public_job(job_id: str) -> Optional[Dict[str, Any]]:
             "clean_audio_path",
         }
     }
-    public["can_download_original"] = job["status"] == "clean"
+    public["can_download_original"] = job["status"] in {"clean", "direct"}
     public["can_purify"] = job["status"] == "needs_consent"
     public["can_download_purified"] = job["status"] == "complete"
     if public["can_download_original"]:
         public["download_url"] = f"/api/jobs/{job_id}/download?kind=original"
         public["download_urls"] = {
             "video": f"/api/jobs/{job_id}/download?kind=original",
-            "audio": f"/api/jobs/{job_id}/download?kind=clean_audio" if job.get("clean_audio_path") else None,
+            "audio": f"/api/jobs/{job_id}/download?kind=clean_audio" if job["status"] == "clean" and job.get("clean_audio_path") else None,
         }
     elif public["can_download_purified"]:
         public["download_url"] = f"/api/jobs/{job_id}/download?kind=purified"
@@ -1361,6 +1485,9 @@ def load_persisted_jobs() -> None:
                 continue
             data.setdefault("purified_audio_path", None)
             data.setdefault("clean_audio_path", None)
+            data.setdefault("queue_position", 0)
+            data.setdefault("queue_length", 0)
+            data.setdefault("estimated_wait_seconds", 0)
             if data.get("status") in active_statuses:
                 data["status"] = "failed"
                 data["stage"] = "توقفت المعالجة"
@@ -1375,3 +1502,5 @@ def load_persisted_jobs() -> None:
 
 
 load_persisted_jobs()
+cleanup_expired_jobs()
+start_cleanup_worker()

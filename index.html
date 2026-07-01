@@ -137,15 +137,15 @@
                 <label class="option-row">
                   <input type="radio" name="purify_mode" value="direct" />
                   <span class="option-label">
-                    <span class="option-name">فحص أمان ثم تحميل عند السلامة</span>
-                    <span class="option-desc">لا يغيّر الصوت إذا ثبت خلوه، ويتوقف تلقائياً إذا ظهرت معازف.</span>
+                    <span class="option-name">تحميل مباشر دون فحص</span>
+                    <span class="option-desc">يجهز الملف كما هو فقط، ولا يشغّل العزل أو التنقية.</span>
                   </span>
                 </label>
 
                 <!-- تحذير التحميل المباشر -->
                 <div class="warning-box" id="direct-warning-box" hidden>
                   ⚠️ <strong>تنبيه الأمان والعهد:</strong> هل أنت متأكد تماماً أن هذا المقطع خالي من أي موسيقى أو معازف؟
-                  سيظل الخادم يفحص المقطع قبل السماح بالتحميل، ولن يطلق الملف إذا ظهر مسار معازف.
+                  هذا الخيار لا يفحص الملف ولا ينقيه، وسيكون التحميل كما هو.
                 </div>
 
               </div>
@@ -217,16 +217,16 @@
 
           <div class="notice clean-notice" id="clean-card" hidden>
             <p class="notice-kicker">الحمد لله</p>
-            <h3>المقطع خال من المعازف</h3>
-            <p>الحمد لله، لم يظهر في الفحص مؤشر معتبر للمعازف. نسأل الله أن يبارك لك في المحتوى الطيب.</p>
+            <h3 id="clean-card-title">المقطع خال من المعازف</h3>
+            <p id="clean-card-message">الحمد لله، لم يظهر في الفحص مؤشر معتبر للمعازف. نسأل الله أن يبارك لك في المحتوى الطيب.</p>
             <div class="download-choice">
               <a class="choice-card" id="clean-video-download" href="#">
-                <strong>تحميل المقطع</strong>
-                <span>الفيديو الأصلي بعد ثبوت سلامته</span>
+                <strong id="clean-video-title">تحميل المقطع</strong>
+                <span id="clean-video-desc">الفيديو الأصلي بعد ثبوت سلامته</span>
               </a>
               <a class="choice-card" id="clean-audio-download" href="#">
-                <strong>تحميل الصوت فقط</strong>
-                <span>نسخة صوتية نظيفة وخفيفة</span>
+                <strong id="clean-audio-title">تحميل الصوت فقط</strong>
+                <span id="clean-audio-desc">نسخة صوتية نظيفة وخفيفة</span>
               </a>
             </div>
           </div>

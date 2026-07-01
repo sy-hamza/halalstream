@@ -36,6 +36,10 @@ const downloadHelperScript = document.querySelector("#download-helper-script");
 const uploadLocalFile = document.querySelector("#upload-local-file");
 const cleanVideoDownload = document.querySelector("#clean-video-download");
 const cleanAudioDownload = document.querySelector("#clean-audio-download");
+const cleanCardTitle = document.querySelector("#clean-card-title");
+const cleanCardMessage = document.querySelector("#clean-card-message");
+const cleanVideoTitle = document.querySelector("#clean-video-title");
+const cleanVideoDesc = document.querySelector("#clean-video-desc");
 const purifiedVideoDownload = document.querySelector("#purified-video-download");
 const purifiedAudioDownload = document.querySelector("#purified-audio-download");
 const metricProgress = document.querySelector("#metric-progress");
@@ -77,6 +81,7 @@ const statusToStep = {
   analyzing: "separate",
   needs_consent: "decision",
   clean: "delivery",
+  direct: "delivery",
   purifying: "separate",
   complete: "delivery",
   failed: "decision"
@@ -433,7 +438,7 @@ async function pollJob(jobId) {
     }
     const job = await response.json();
     renderJob(job);
-    if (["clean", "needs_consent", "complete", "failed"].includes(job.status)) {
+    if (["clean", "direct", "needs_consent", "complete", "failed"].includes(job.status)) {
       window.clearInterval(pollTimer);
       pollTimer = null;
       setBusy(false);
@@ -456,9 +461,10 @@ function renderJob(job) {
   appendLog(humanLog(job));
   hideResultCards();
 
-  if (job.status === "clean") {
+  if (job.status === "clean" || job.status === "direct") {
     setDownloadLink(cleanVideoDownload, job.download_urls?.video || job.download_url);
     setDownloadLink(cleanAudioDownload, job.download_urls?.audio);
+    renderCleanCardCopy(job.status);
     cleanCard.hidden = false;
     window.setTimeout(() => {
       cleanCard.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -547,12 +553,30 @@ function setStage(activeStep) {
 
 function hideResultCards() {
   cleanCard.hidden = true;
+  cleanAudioDownload.hidden = false;
   warningCard.hidden = true;
   warningCard.style.animation = "none";
   completeCard.hidden = true;
   errorCard.hidden = true;
   localHelper.hidden = true;
   hideDecisionOverlay();
+}
+
+function renderCleanCardCopy(status) {
+  if (status === "direct") {
+    cleanCardTitle.textContent = "الملف جاهز للتحميل المباشر";
+    cleanCardMessage.textContent = "تم تجهيز الملف كما هو بناءً على اختيار التحميل دون فحص. لم يتم تشغيل العزل أو التنقية.";
+    cleanVideoTitle.textContent = "تحميل الملف";
+    cleanVideoDesc.textContent = "الملف الأصلي دون فحص أو تعديل";
+    cleanAudioDownload.hidden = true;
+    return;
+  }
+
+  cleanCardTitle.textContent = "المقطع خال من المعازف";
+  cleanCardMessage.textContent = "الحمد لله، لم يظهر في الفحص مؤشر معتبر للمعازف. نسأل الله أن يبارك لك في المحتوى الطيب.";
+  cleanVideoTitle.textContent = "تحميل المقطع";
+  cleanVideoDesc.textContent = "الفيديو الأصلي بعد ثبوت سلامته";
+  cleanAudioDownload.hidden = false;
 }
 
 function showDecisionOverlay() {
@@ -581,6 +605,10 @@ function updateSignalMetric(job) {
     metricSignal.textContent = "منقّى";
     return;
   }
+  if (job.status === "direct") {
+    metricSignal.textContent = "دون فحص";
+    return;
+  }
   if (job.status === "needs_consent") {
     metricSignal.textContent = "رُصدت معازف";
     return;
@@ -601,6 +629,7 @@ function humanStage(job) {
   if (job.status === "needs_consent") return "رُصدت معازف";
   if (job.status === "complete") return "تمت إزالة المعازف";
   if (job.status === "clean") return "المقطع سليم";
+  if (job.status === "direct") return "تحميل مباشر";
   if (job.status === "purifying") return "إزالة المعازف";
   if (job.status === "separating") return "عزل الصوت";
   if (job.status === "downloading") return "تحميل المقطع";
@@ -609,6 +638,14 @@ function humanStage(job) {
 }
 
 function humanMessage(job) {
+  if (job.status === "queued") {
+    const position = Number(job.queue_position || 0);
+    const estimate = Number(job.estimated_wait_seconds || 0);
+    if (position > 0) {
+      return `دورك في طابور العزل رقم ${position}. الوقت التقريبي للبدء: ${formatDuration(estimate)}.`;
+    }
+    return "الطلب محفوظ في قائمة الانتظار وسيبدأ تلقائياً عند فراغ خادم المعالجة.";
+  }
   if (job.status === "downloading") {
     return "نحمّل المقطع إلى خادم المعالجة. إن طال الانتظار، فتبويب ملف أسرع وأثبت غالباً.";
   }
@@ -622,7 +659,7 @@ function humanMessage(job) {
     return "⚠️ تم رصد مسار معازف! أوقفنا التحميل. يرجى النزول لأسفل لوحة المعالجة والموافقة لإكمال عملية التطهير.";
   }
   if (job.status === "purifying") {
-    return `${pickWaitingNote()} نجهز النسخة المنقّاة الآن.`;
+    return `${pickWaitingNote()} رصدنا معازف ونجهز النسخة المنقّاة تلقائياً.`;
   }
   if (job.status === "complete") {
     return "تم بحمد الله عزل مسار المعازف وإعداد نسخة منقّاة قدر الإمكان. اختر تحميل المقطع أو الصوت فقط.";
@@ -630,18 +667,26 @@ function humanMessage(job) {
   if (job.status === "clean") {
     return "الحمد لله، لم يظهر مؤشر معتبر للمعازف. يمكنك تحميل المقطع أو الصوت فقط.";
   }
+  if (job.status === "direct") {
+    return "تم تجهيز الملف للتحميل المباشر كما هو، دون فحص أو تنقية.";
+  }
   return job.message || "خادم المعالجة يعالج المقطع الآن.";
 }
 
 function humanLog(job) {
+  if (job.status === "queued") {
+    const position = Number(job.queue_position || 0);
+    return position > 0 ? `طابور العزل: دورك رقم ${position}.` : "طابور العزل: بانتظار توفر الخادم.";
+  }
   if (job.status === "downloading") return "تحميل المقطع: روابط YouTube قد تتأخر؛ رفع الملف مباشرة يكون أسرع غالباً.";
   if (job.status === "extracting") return "استخراج الصوت: نجهز المسار الصوتي للفحص.";
   if (job.status === "separating") return `عزل الصوت: ${pickWaitingNote()}`;
   if (job.status === "analyzing") return "مراجعة النتيجة: نتحقق قبل السماح بالتحميل.";
   if (job.status === "needs_consent") return "قرار الفحص: رُصدت معازف، والتحميل متوقف حتى توافق على الإزالة.";
-  if (job.status === "purifying") return "إزالة المعازف: نجهز النسخة المنقّاة.";
+  if (job.status === "purifying") return "إزالة المعازف: رصدنا معازف ونجهز النسخة المنقّاة تلقائياً.";
   if (job.status === "complete") return "تمت إزالة المعازف: الملف المنقّى جاهز للتحميل.";
   if (job.status === "clean") return "الحمد لله: المقطع سليم وجاهز للتحميل.";
+  if (job.status === "direct") return "تحميل مباشر: الملف جاهز كما هو دون فحص.";
   return job.message || "جار العمل.";
 }
 
@@ -731,6 +776,20 @@ function formatTime(seconds) {
   const minutes = Math.floor(seconds / 60).toString().padStart(2, "0");
   const rest = Math.floor(seconds % 60).toString().padStart(2, "0");
   return `${minutes}:${rest}`;
+}
+
+function formatDuration(seconds) {
+  const safeSeconds = Math.max(0, Number(seconds) || 0);
+  if (safeSeconds < 60) {
+    return "أقل من دقيقة";
+  }
+  const minutes = Math.ceil(safeSeconds / 60);
+  if (minutes < 60) {
+    return `${minutes} دقيقة تقريباً`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours} ساعة و${rest} دقيقة تقريباً` : `${hours} ساعة تقريباً`;
 }
 
 function resetLog(message) {
