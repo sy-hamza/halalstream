@@ -13,6 +13,7 @@ import traceback
 import urllib.request
 import uuid
 import wave
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -59,6 +60,12 @@ AUTO_PURIFY_ON_DETECTION = os.getenv("HALALSTREAM_AUTO_PURIFY_ON_DETECTION", "1"
 ESTIMATED_PROCESSING_SECONDS = max(60, int(os.getenv("HALALSTREAM_ESTIMATED_PROCESSING_SECONDS", "240")))
 JOB_TTL_HOURS = max(1.0, float(os.getenv("HALALSTREAM_JOB_TTL_HOURS", "12")))
 CLEANUP_INTERVAL_SECONDS = max(300, int(os.getenv("HALALSTREAM_CLEANUP_INTERVAL_SECONDS", "1800")))
+COBALT_PARALLELISM = max(1, int(os.getenv("HALALSTREAM_COBALT_PARALLELISM", "5")))
+COBALT_API_TIMEOUT = max(3, int(os.getenv("HALALSTREAM_COBALT_API_TIMEOUT", "8")))
+COBALT_DOWNLOAD_TIMEOUT = max(10, int(os.getenv("HALALSTREAM_COBALT_DOWNLOAD_TIMEOUT", "25")))
+VERIFY_PURIFIED_OUTPUT = os.getenv("HALALSTREAM_VERIFY_PURIFIED_OUTPUT", "1").strip().lower() in {"1", "true", "yes"}
+RESIDUAL_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_RESIDUAL_MUSIC_RATIO_THRESHOLD", "0.12"))
+RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD = float(os.getenv("HALALSTREAM_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD", "0.01"))
 HOSTED_SPACE = bool(os.getenv("SPACE_ID") or os.getenv("SPACE_HOST"))
 ALLOW_LINK_DOWNLOADS = os.getenv("HALALSTREAM_ALLOW_LINK_DOWNLOADS", "").strip().lower() in {"1", "true", "yes"}
 LINK_DOWNLOADS_RELIABLE = True
@@ -167,6 +174,9 @@ def health() -> Dict[str, Any]:
         "waiting_processing_jobs": waiting_count,
         "estimated_processing_seconds": ESTIMATED_PROCESSING_SECONDS,
         "job_ttl_hours": JOB_TTL_HOURS,
+        "cobalt_parallelism": COBALT_PARALLELISM,
+        "verify_purified_output": VERIFY_PURIFIED_OUTPUT,
+        "residual_music_ratio_threshold": RESIDUAL_MUSIC_RATIO_THRESHOLD,
         "max_active_processing_jobs": MAX_ACTIVE_PROCESSING_JOBS,
         "cuda_available": (lambda: __import__("torch").cuda.is_available() if has_module("torch") else False)(),
         "hosted_space": HOSTED_SPACE,
@@ -278,6 +288,7 @@ def retry(job_id: str) -> Dict[str, str]:
         has_music=None,
         instrumental_ratio=None,
         confidence=None,
+        residual_music_ratio=None,
         audio_path=None,
         vocals_path=None,
         instrumental_path=None,
@@ -353,6 +364,7 @@ def create_job(
         "has_music": None,
         "instrumental_ratio": None,
         "confidence": None,
+        "residual_music_ratio": None,
         "original_path": None,
         "audio_path": None,
         "vocals_path": None,
@@ -477,6 +489,7 @@ def complete_direct_job(job_id: str, original: Path) -> None:
         has_music=None,
         instrumental_ratio=None,
         confidence=None,
+        residual_music_ratio=None,
         original_path=str(original),
         audio_path=None,
         vocals_path=None,
@@ -505,6 +518,8 @@ def purify_job(job_id: str) -> None:
         if instrumental and instrumental.exists():
             update_job(job_id, progress=84, message="نزيل بقايا المعازف من مسار الكلام مع الحفاظ على وضوح الصوت.")
             purified_vocals = purify_vocal_stem(vocals, instrumental, job_id)
+            if VERIFY_PURIFIED_OUTPUT:
+                verify_purified_audio(job_id, purified_vocals, instrumental)
         else:
             purified_vocals = vocals
 
@@ -550,73 +565,90 @@ def purify_job(job_id: str) -> None:
 
 
 def download_via_cobalt(job_id: str, url: str, workdir: Path) -> Path:
+    errors: list[str] = []
+    indexed_apis = list(enumerate(COBALT_FALLBACK_APIS))
+    for start in range(0, len(indexed_apis), COBALT_PARALLELISM):
+        batch = indexed_apis[start:start + COBALT_PARALLELISM]
+        labels = "، ".join(api.split("//", 1)[1].split("/", 1)[0] for _, api in batch)
+        update_job(job_id, message=f"نبحث عن أسرع خادم تنزيل متاح: {labels}")
+        executor = ThreadPoolExecutor(max_workers=len(batch))
+        futures = {
+            executor.submit(try_cobalt_download, job_id, url, workdir, api_url, index): api_url
+            for index, api_url in batch
+        }
+        try:
+            for future in as_completed(futures):
+                api_url = futures[future]
+                try:
+                    path = future.result()
+                    if path and path.exists() and path.stat().st_size > 0:
+                        for other in futures:
+                            if other is not future:
+                                other.cancel()
+                        update_job(job_id, message=f"اكتمل التحميل عبر {api_url.split('//', 1)[1].split('/', 1)[0]}.")
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        return path
+                except Exception as exc:
+                    errors.append(f"{api_url}: {exc}")
+                    print(f"Cobalt download failed on {api_url}: {exc}")
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    if errors:
+        print("Cobalt errors:", "\n".join(errors[-5:]))
+    raise RuntimeError("فشلت جميع محاولات التنزيل المباشرة وعبر الخوادم المساندة.")
+
+
+def try_cobalt_download(job_id: str, url: str, workdir: Path, api_url: str, index: int) -> Optional[Path]:
     context = ssl._create_unverified_context()
     payload = {
         "url": url,
         "downloadMode": "auto",
         "videoQuality": "720",
     }
-    data_bytes = json.dumps(payload).encode("utf-8")
-    
-    for api_url in COBALT_FALLBACK_APIS:
-        update_job(job_id, message=f"نحاول التنزيل عبر خادم مساند: {api_url.split('//')[1].split('/')[0]}")
-        try:
-            req = urllib.request.Request(
-                api_url,
-                data=data_bytes,
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                },
-                method="POST"
-            )
-            with urllib.request.urlopen(req, context=context, timeout=15) as response:
-                res = json.loads(response.read().decode("utf-8"))
-                
-                status = res.get("status")
-                if status in ("tunnel", "redirect"):
-                    download_url = res.get("url")
-                    filename = res.get("filename") or "downloaded.mp4"
-                    suffix = safe_suffix(filename)
-                    out_path = workdir / f"downloaded{suffix}"
-                    
-                    update_job(job_id, message="نجح خادم التنزيل المساند. نسحب الملف الآن...")
-                    
-                    dl_req = urllib.request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(dl_req, context=context, timeout=30) as dl_res:
-                        with out_path.open("wb") as f:
-                            while True:
-                                chunk = dl_res.read(1024 * 1024)
-                                if not chunk:
-                                    break
-                                f.write(chunk)
-                    if out_path.exists() and out_path.stat().st_size > 0:
-                        return out_path
-                elif status == "picker":
-                    picker_items = res.get("picker", [])
-                    if picker_items:
-                        download_url = picker_items[0].get("url")
-                        filename = picker_items[0].get("filename") or "downloaded.mp4"
-                        suffix = safe_suffix(filename)
-                        out_path = workdir / f"downloaded{suffix}"
-                        
-                        update_job(job_id, message="نجح خادم التنزيل المساند (عبر قائمة الخيارات). نسحب الملف...")
-                        
-                        dl_req = urllib.request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
-                        with urllib.request.urlopen(dl_req, context=context, timeout=30) as dl_res:
-                            with out_path.open("wb") as f:
-                                while True:
-                                    chunk = dl_res.read(1024 * 1024)
-                                    if not chunk:
-                                        break
-                                    f.write(chunk)
-                        if out_path.exists() and out_path.stat().st_size > 0:
-                            return out_path
-        except Exception as e:
-            print(f"Cobalt download failed on {api_url}: {e}")
-            
-    raise RuntimeError("فشلت جميع محاولات التنزيل المباشرة وعبر الخوادم المساندة.")
+    req = urllib.request.Request(
+        api_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, context=context, timeout=COBALT_API_TIMEOUT) as response:
+        res = json.loads(response.read().decode("utf-8"))
+
+    status = res.get("status")
+    download_url = None
+    filename = None
+    if status in ("tunnel", "redirect"):
+        download_url = res.get("url")
+        filename = res.get("filename")
+    elif status == "picker":
+        picker_items = res.get("picker", [])
+        if picker_items:
+            download_url = picker_items[0].get("url")
+            filename = picker_items[0].get("filename")
+
+    if not download_url:
+        return None
+
+    suffix = safe_suffix(filename or "downloaded.mp4")
+    partial_path = workdir / f"downloaded-{index}.part"
+    out_path = workdir / f"downloaded-{index}{suffix}"
+    dl_req = urllib.request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(dl_req, context=context, timeout=COBALT_DOWNLOAD_TIMEOUT) as dl_res:
+        with partial_path.open("wb") as f:
+            while True:
+                chunk = dl_res.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+    if partial_path.exists() and partial_path.stat().st_size > 0:
+        partial_path.replace(out_path)
+        return out_path
+    return None
 
 
 def download_link(job_id: str, url: str) -> Path:
@@ -1091,6 +1123,46 @@ def soft_limit_audio(audio):
     return np.clip(audio, -0.98, 0.98).astype(np.float32)
 
 
+def verify_purified_audio(job_id: str, purified_vocals: Path, instrumental_path: Path) -> None:
+    ratio, absolute = estimate_residual_music_bleed(purified_vocals, instrumental_path)
+    update_job(job_id, residual_music_ratio=round(ratio, 4))
+    if ratio >= RESIDUAL_MUSIC_RATIO_THRESHOLD and absolute >= RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD:
+        raise RuntimeError(
+            "بقي أثر موسيقي واضح بعد التنقية، لذلك أوقفنا إخراج الملف احتياطاً. "
+            "هذا المقطع يحتاج نموذج عزل أقوى أو معالجة يدوية."
+        )
+
+
+def estimate_residual_music_bleed(purified_vocals: Path, instrumental_path: Path) -> tuple[float, float]:
+    try:
+        import numpy as np
+        import soundfile as sf
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("تنقص مكتبات فحص الصوت بعد التنقية: numpy و soundfile.") from exc
+
+    clean, sr = sf.read(str(purified_vocals), always_2d=True, dtype="float32")
+    instrumental, inst_sr = sf.read(str(instrumental_path), always_2d=True, dtype="float32")
+    if sr != inst_sr:
+        return 0.0, 0.0
+
+    length = min(len(clean), len(instrumental))
+    if length <= 0:
+        return 0.0, 0.0
+
+    clean = np.mean(clean[:length], axis=1).astype(np.float32)
+    instrumental = np.mean(instrumental[:length], axis=1).astype(np.float32)
+    n_fft = 2048
+    hop = 512
+    clean_spec, _, _ = stft_np(clean, n_fft=n_fft, hop=hop)
+    inst_spec, _, _ = stft_np(instrumental, n_fft=n_fft, hop=hop)
+    clean_mag = np.abs(clean_spec).astype(np.float32)
+    inst_mag = np.abs(inst_spec).astype(np.float32)
+    shared = np.minimum(clean_mag, inst_mag)
+    ratio = float(np.sum(shared) / max(np.sum(clean_mag), 1e-8))
+    absolute = float(np.sqrt(np.mean(np.square(clean))))
+    return ratio, absolute
+
+
 def encode_audio(job_id: str, source_audio: Path, filename: str, progress: int, message: str, filter_vocals: bool = False) -> Path:
     ffmpeg = require_ffmpeg()
     out = job_dir(job_id) / filename
@@ -1465,6 +1537,8 @@ def friendly_error(message: str) -> str:
         if "Killed" in message or "out of memory" in message.lower() or "cannot allocate memory" in message.lower():
             return "موارد الاستضافة لم تكفِ لعزل هذا المقطع. جرّب مقطعاً أقصر."
         return "تعذر تشغيل محرك عزل الصوت على هذا الملف. جرّب ملفاً أقصر أو صيغة صوت/فيديو أخرى."
+    if "بقي أثر موسيقي واضح" in message:
+        return "بقي أثر موسيقي واضح بعد التنقية، لذلك أوقفنا إخراج الملف احتياطاً. جرّب مقطعاً آخر أو ارفع نسخة أقصر."
     if "HTTP Error 403" in message or "Forbidden" in message:
         return "منع YouTube تنزيل هذا الرابط مؤقتاً. أعد المحاولة، وإن تكرر الخطأ فقد يحتاج الرابط إلى كوكيز المتصفح أو طريقة تحميل مختلفة."
     if "UNEXPECTED_EOF_WHILE_READING" in message or "SSL" in message:
@@ -1485,6 +1559,7 @@ def load_persisted_jobs() -> None:
                 continue
             data.setdefault("purified_audio_path", None)
             data.setdefault("clean_audio_path", None)
+            data.setdefault("residual_music_ratio", None)
             data.setdefault("queue_position", 0)
             data.setdefault("queue_length", 0)
             data.setdefault("estimated_wait_seconds", 0)
