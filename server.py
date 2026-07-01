@@ -433,8 +433,16 @@ def purify_job(job_id: str) -> None:
         if not vocals.exists():
             raise RuntimeError("لم نجد مسار الصوت البشري الناتج من نموذج العزل.")
 
+        # Smart voice-activity masking: mute vocals where instrumentals dominate
+        instrumental = Path(job["instrumental_path"]) if job.get("instrumental_path") else None
+        if instrumental and instrumental.exists():
+            update_job(job_id, progress=84, message="نطبّق كتماً ذكياً على الأجزاء التي لا تحتوي على صوت بشري.")
+            masked_vocals = apply_voice_mask(vocals, instrumental, job_id)
+        else:
+            masked_vocals = vocals
+
         ffmpeg = require_ffmpeg()
-        audio_out = encode_audio(job_id, vocals, "purified-audio.m4a", 86, "نجهز نسخة صوتية منقّاة وسريعة التحميل.", filter_vocals=True)
+        audio_out = encode_audio(job_id, masked_vocals, "purified-audio.m4a", 86, "نجهز نسخة صوتية منقّاة وسريعة التحميل.", filter_vocals=True)
         out = job_dir(job_id) / "purified.mp4"
         update_job(job_id, progress=92, message="نركّب الصوت المنقّى على المقطع دون إعادة ضغط الفيديو.")
         run_cmd(
@@ -795,6 +803,73 @@ def find_demucs_stems(out_dir: Path, stem_name: str, model_name: str = None) -> 
         return vocals_matches[0], instrumental_matches[0]
 
     return vocals, instrumental
+
+
+def apply_voice_mask(vocals_path: Path, instrumental_path: Path, job_id: str) -> Path:
+    """Compare vocals vs instrumentals energy per-frame.
+    Where instrumentals dominate (no singing), mute the vocals.
+    Returns path to the masked vocals WAV file."""
+    import struct as _struct
+
+    frame_ms = 100  # 100ms analysis frames
+    masked_out = vocals_path.parent / "vocals_masked.wav"
+
+    with wave.open(str(vocals_path), "rb") as vw:
+        params = vw.getparams()
+        rate = vw.getframerate()
+        n_ch = vw.getnchannels()
+        sw = vw.getsampwidth()
+        v_raw = vw.readframes(vw.getnframes())
+
+    with wave.open(str(instrumental_path), "rb") as iw:
+        i_raw = iw.readframes(iw.getnframes())
+
+    # Parse samples (16-bit signed)
+    fmt = f"<{len(v_raw) // sw}h"
+    v_samples = list(_struct.unpack(fmt, v_raw))
+    fmt2 = f"<{len(i_raw) // sw}h"
+    i_samples = list(_struct.unpack(fmt2, i_raw))
+
+    frame_size = int(rate * n_ch * frame_ms / 1000)  # samples per frame (all channels)
+    n_frames = len(v_samples) // frame_size
+
+    for f_idx in range(n_frames):
+        start = f_idx * frame_size
+        end = start + frame_size
+
+        # Compute RMS for this frame
+        v_chunk = v_samples[start:end]
+        i_chunk = i_samples[start:end] if end <= len(i_samples) else i_samples[start:]
+
+        v_rms = (sum(s * s for s in v_chunk) / max(len(v_chunk), 1)) ** 0.5
+        i_rms = (sum(s * s for s in i_chunk) / max(len(i_chunk), 1)) ** 0.5
+
+        # If instrumental energy is more than 60% of total, this is a music-only section
+        total_e = v_rms + i_rms
+        if total_e > 0:
+            vocal_ratio = v_rms / total_e
+        else:
+            vocal_ratio = 1.0
+
+        # Mute if vocals are weak relative to instrumentals
+        # vocal_ratio < 0.4 means instrumentals are dominant (>60%)
+        if vocal_ratio < 0.4:
+            # Full mute - this is a music-only section
+            for j in range(start, min(end, len(v_samples))):
+                v_samples[j] = 0
+        elif vocal_ratio < 0.5:
+            # Partial attenuation - transitional zone
+            gain = (vocal_ratio - 0.4) / 0.1  # 0.0 to 1.0
+            for j in range(start, min(end, len(v_samples))):
+                v_samples[j] = int(v_samples[j] * gain)
+
+    # Write masked vocals
+    out_raw = _struct.pack(f"<{len(v_samples)}h", *v_samples)
+    with wave.open(str(masked_out), "wb") as wf:
+        wf.setparams(params)
+        wf.writeframes(out_raw)
+
+    return masked_out
 
 
 def encode_audio(job_id: str, source_audio: Path, filename: str, progress: int, message: str, filter_vocals: bool = False) -> Path:
