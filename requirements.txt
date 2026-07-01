@@ -7,3 +7,4 @@ imageio-ffmpeg==0.5.1
 demucs==4.0.1
 numpy==1.26.4
 soundfile==0.13.1
+requests==2.32.4

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import base64
 import shutil
 import ssl
 import subprocess
@@ -31,6 +32,11 @@ try:
     import yt_dlp
 except Exception:  # pragma: no cover - reported through /api/health
     yt_dlp = None
+
+try:
+    import requests
+except Exception:  # pragma: no cover - optional external worker client
+    requests = None
 
 
 ROOT = Path(__file__).resolve().parent
@@ -66,6 +72,9 @@ COBALT_DOWNLOAD_TIMEOUT = max(10, int(os.getenv("HALALSTREAM_COBALT_DOWNLOAD_TIM
 VERIFY_PURIFIED_OUTPUT = os.getenv("HALALSTREAM_VERIFY_PURIFIED_OUTPUT", "1").strip().lower() in {"1", "true", "yes"}
 RESIDUAL_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_RESIDUAL_MUSIC_RATIO_THRESHOLD", "0.12"))
 RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD = float(os.getenv("HALALSTREAM_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD", "0.01"))
+MODAL_PURIFY_URL = os.getenv("HALALSTREAM_MODAL_PURIFY_URL", "").strip()
+MODAL_PURIFY_SECRET = os.getenv("HALALSTREAM_MODAL_SECRET", "").strip()
+MODAL_PURIFY_TIMEOUT = max(300, int(os.getenv("HALALSTREAM_MODAL_PURIFY_TIMEOUT", "1800")))
 HOSTED_SPACE = bool(os.getenv("SPACE_ID") or os.getenv("SPACE_HOST"))
 ALLOW_LINK_DOWNLOADS = os.getenv("HALALSTREAM_ALLOW_LINK_DOWNLOADS", "").strip().lower() in {"1", "true", "yes"}
 LINK_DOWNLOADS_RELIABLE = True
@@ -177,6 +186,8 @@ def health() -> Dict[str, Any]:
         "cobalt_parallelism": COBALT_PARALLELISM,
         "verify_purified_output": VERIFY_PURIFIED_OUTPUT,
         "residual_music_ratio_threshold": RESIDUAL_MUSIC_RATIO_THRESHOLD,
+        "modal_purify_enabled": bool(MODAL_PURIFY_URL and MODAL_PURIFY_SECRET and requests is not None),
+        "modal_purify_url_configured": bool(MODAL_PURIFY_URL),
         "max_active_processing_jobs": MAX_ACTIVE_PROCESSING_JOBS,
         "cuda_available": (lambda: __import__("torch").cuda.is_available() if has_module("torch") else False)(),
         "hosted_space": HOSTED_SPACE,
@@ -185,7 +196,7 @@ def health() -> Dict[str, Any]:
         "youtube_pot_provider": bool(YOUTUBE_POT_BASE_URL),
         "youtube_fetch_pot": YOUTUBE_FETCH_POT,
         "youtube_remote_components": list(YOUTUBE_REMOTE_COMPONENTS),
-        "message": "الخادم يعمل. اكتمال المعالجة يحتاج yt-dlp و ffmpeg و demucs.",
+        "message": "الخادم يعمل. اكتمال المعالجة يحتاج yt-dlp و ffmpeg، ومعهما إما demucs محلي أو عامل Modal.",
     }
 
 
@@ -399,9 +410,13 @@ def process_job(job_id: str) -> None:
             complete_direct_job(job_id, original)
             return
 
-        ensure_runtime()
         original = prepare_original(job_id, job)
 
+        if modal_purify_available():
+            process_job_with_modal(job_id, original)
+            return
+
+        ensure_runtime()
         release_slot = acquire_processing_slot(job_id)
         update_job(job_id, queue_position=0, queue_length=0, estimated_wait_seconds=0)
 
@@ -504,6 +519,169 @@ def complete_direct_job(job_id: str, original: Path) -> None:
         estimated_wait_seconds=0,
     )
 
+
+def modal_purify_available() -> bool:
+    return bool(MODAL_PURIFY_URL and MODAL_PURIFY_SECRET and requests is not None)
+
+
+def process_job_with_modal(job_id: str, original: Path) -> None:
+    if requests is None:
+        raise RuntimeError("مكتبة requests غير مثبتة، ولا يمكن الاتصال بعامل Modal.")
+
+    modal_audio = prepare_modal_audio(job_id, original)
+    update_job(
+        job_id,
+        status="separating",
+        stage="تنقية خارجية",
+        progress=38,
+        message="نرسل الملف إلى عامل Modal لتشغيل التنقية على GPU عند الطلب.",
+        queue_position=0,
+        queue_length=0,
+        estimated_wait_seconds=0,
+    )
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            update_job(
+                job_id,
+                message="نرسل الملف إلى عامل Modal لتشغيل التنقية على GPU عند الطلب."
+                if attempt == 1
+                else f"نعيد الاتصال بعامل Modal، المحاولة {attempt} من 3.",
+            )
+            with modal_audio.open("rb") as file_obj:
+                response = requests.post(
+                    MODAL_PURIFY_URL,
+                    headers={"x-halalstream-secret": MODAL_PURIFY_SECRET},
+                    data={
+                        "filename": modal_audio.name,
+                        "original_filename": original.name,
+                        "quality": "high",
+                    },
+                    files={"file": (modal_audio.name, file_obj, "audio/flac")},
+                    timeout=MODAL_PURIFY_TIMEOUT,
+                )
+            if response.status_code != 200:
+                raise RuntimeError(f"فشل عامل Modal: HTTP {response.status_code}\n{response.text[:1200]}")
+            payload = response.json()
+            break
+        except Exception as exc:
+            last_error = exc
+            if attempt < 3:
+                time.sleep(2 * attempt)
+    else:
+        raise RuntimeError(f"تعذر تشغيل التنقية عبر Modal.\n{last_error}") from last_error
+
+    audio_b64 = payload.get("audio_base64")
+    if not audio_b64:
+        raise RuntimeError("عامل Modal لم يرجع ملف صوت صالح.")
+
+    audio_bytes = base64.b64decode(audio_b64)
+    status = payload.get("status") or "complete"
+    ratio = payload.get("instrumental_ratio")
+    residual = payload.get("residual_music_ratio")
+    mode = payload.get("purification_mode")
+    audio_name = "clean-audio.m4a" if status == "clean" else "purified-audio.m4a"
+    audio_path = job_dir(job_id) / audio_name
+    audio_path.write_bytes(audio_bytes)
+
+    common = {
+        "has_music": payload.get("has_music"),
+        "instrumental_ratio": round(float(ratio), 4) if ratio is not None else None,
+        "confidence": payload.get("confidence"),
+        "residual_music_ratio": round(float(residual), 4) if residual is not None else None,
+        "purification_mode": mode,
+        "audio_path": str(audio_path),
+    }
+
+    if status == "clean":
+        update_job(
+            job_id,
+            status="clean",
+            stage="جاهز للتحميل",
+            progress=100,
+            message=payload.get("message") or "الحمد لله، لم يظهر مؤشر معتبر للمعازف. يمكنك تحميل المقطع أو الصوت فقط.",
+            clean_audio_path=str(audio_path),
+            **common,
+        )
+        return
+
+    out = mux_audio_to_video(job_id, original, audio_path)
+    update_job(
+        job_id,
+        status="complete",
+        stage="تمت إزالة المعازف",
+        progress=100,
+        message=payload.get("message") or "تم بحمد الله إعداد نسخة منقّاة عبر عامل Modal. الملف جاهز للتحميل.",
+        purified_path=str(out),
+        purified_audio_path=str(audio_path),
+        **common,
+    )
+
+
+def prepare_modal_audio(job_id: str, original: Path) -> Path:
+    ffmpeg = require_ffmpeg()
+    out = job_dir(job_id) / "modal-input.flac"
+    update_job(
+        job_id,
+        status="extracting",
+        stage="تجهيز الصوت",
+        progress=30,
+        message="نجهز مسار صوت نقي لإرساله إلى عامل Modal بدل رفع الفيديو كاملاً.",
+    )
+    run_cmd(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(original),
+            "-vn",
+            "-ac",
+            "2",
+            "-ar",
+            "44100",
+            "-sample_fmt",
+            "s16",
+            "-c:a",
+            "flac",
+            str(out),
+        ],
+        "فشل تجهيز الصوت لإرساله إلى عامل Modal.",
+        job_id=job_id,
+    )
+    return out
+
+
+def mux_audio_to_video(job_id: str, original: Path, audio_out: Path) -> Path:
+    ffmpeg = require_ffmpeg()
+    out = job_dir(job_id) / "purified.mp4"
+    update_job(job_id, progress=92, message="نركّب الصوت المنقّى على المقطع دون إعادة ضغط الفيديو.")
+    run_cmd(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(original),
+            "-i",
+            str(audio_out),
+            "-map",
+            "0:v:0?",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "copy",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            str(out),
+        ],
+        "فشل تركيب الصوت المنقّى على الفيديو.",
+        job_id=job_id,
+    )
+    return out
+
+
 def purify_job(job_id: str) -> None:
     try:
         job = get_internal_job(job_id)
@@ -525,34 +703,8 @@ def purify_job(job_id: str) -> None:
         else:
             purified_vocals = vocals
 
-        ffmpeg = require_ffmpeg()
         audio_out = encode_audio(job_id, purified_vocals, "purified-audio.m4a", 86, "نجهز نسخة صوتية منقّاة وسريعة التحميل.", filter_vocals=True)
-        out = job_dir(job_id) / "purified.mp4"
-        update_job(job_id, progress=92, message="نركّب الصوت المنقّى على المقطع دون إعادة ضغط الفيديو.")
-        run_cmd(
-            [
-                ffmpeg,
-                "-y",
-                "-i",
-                str(original),
-                "-i",
-                str(audio_out),
-                "-map",
-                "0:v:0?",
-                "-map",
-                "1:a:0",
-                "-c:v",
-                "copy",
-                "-c:a",
-                "copy",
-                "-shortest",
-                "-movflags",
-                "+faststart",
-                str(out),
-            ],
-            "فشل تركيب الصوت المنقّى على الفيديو.",
-            job_id=job_id,
-        )
+        out = mux_audio_to_video(job_id, original, audio_out)
         update_job(
             job_id,
             status="complete",

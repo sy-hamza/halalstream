@@ -280,13 +280,14 @@ async function checkHealth() {
       throw new Error("health failed");
     }
     const health = await response.json();
-    serverReady = Boolean(health.ok && health.ffmpeg && health.yt_dlp && health.demucs);
+    const purificationReady = Boolean(health.demucs || health.modal_purify_enabled);
+    serverReady = Boolean(health.ok && health.ffmpeg && health.yt_dlp && purificationReady);
     linkDownloadsReliable = health.link_downloads_reliable !== false;
     hostingNote.hidden = linkDownloadsReliable;
     serverPill.classList.toggle("is-ready", serverReady);
     serverPill.classList.toggle("is-error", !serverReady);
-    engineMode.textContent = "تنقية صارمة";
-    engineJobs.textContent = linkDownloadsReliable ? "آمن" : "رفع الملفات أفضل";
+    engineMode.textContent = health.modal_purify_enabled ? "تنقية Modal" : "تنقية صارمة";
+    engineJobs.textContent = health.modal_purify_enabled ? "GPU عند الطلب" : (linkDownloadsReliable ? "آمن" : "رفع الملفات أفضل");
 
     if (serverReady) {
       if (healthPollTimer) {
@@ -316,7 +317,7 @@ async function checkHealth() {
     const missing = [];
     if (!health.yt_dlp) missing.push("yt-dlp");
     if (!health.ffmpeg) missing.push("ffmpeg");
-    if (!health.demucs) missing.push("demucs");
+    if (!purificationReady) missing.push("demucs أو Modal");
     serverText.textContent = `ينقص: ${missing.join("، ")}`;
     updateStatus("الخادم يعمل لكن المتطلبات ناقصة", `ثبّت المتطلبات ثم أعد تشغيل السيرفر. العناصر الناقصة: ${missing.join("، ")}.`, 0);
   } catch (error) {
