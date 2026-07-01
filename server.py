@@ -738,7 +738,7 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
     out_dir = job_dir(job_id) / "separated"
     
     # Select Demucs model based on requested quality
-    model = DEMUCS_MODEL # "htdemucs"
+    model = "htdemucs_ft" if quality == "high" else DEMUCS_MODEL
     if quality == "fast":
         model = "hdemucs_mmi"
         
