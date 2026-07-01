@@ -40,6 +40,7 @@ ASSETS_DIR = ROOT / "assets"
 DEMUCS_MODEL = os.getenv("HALALSTREAM_DEMUCS_MODEL", "htdemucs")
 DEMUCS_JOBS = int(os.getenv("HALALSTREAM_DEMUCS_JOBS", "1"))
 DEMUCS_SEGMENT = int(float(os.getenv("HALALSTREAM_DEMUCS_SEGMENT", "0")))
+DEMUCS_MAX_SEGMENT = float(os.getenv("HALALSTREAM_DEMUCS_MAX_SEGMENT", "7.0"))
 DEMUCS_OVERLAP = float(os.getenv("HALALSTREAM_DEMUCS_OVERLAP", "0.75"))
 # Dynamically adjust active jobs based on GPU availability
 try:
@@ -147,6 +148,7 @@ def health() -> Dict[str, Any]:
         "demucs_jobs": DEMUCS_JOBS,
         "demucs_shifts": DEMUCS_SHIFTS,
         "demucs_segment": DEMUCS_SEGMENT,
+        "demucs_max_segment": DEMUCS_MAX_SEGMENT,
         "demucs_overlap": DEMUCS_OVERLAP,
         "music_ratio_threshold": MUSIC_RATIO_THRESHOLD,
         "strict_direct_bypass": not ALLOW_UNCHECKED_DIRECT,
@@ -761,7 +763,8 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
     update_job(job_id, status="separating", stage="عزل الصوت", progress=42, message=msg)
     shifts = 1 if quality == "fast" else DEMUCS_SHIFTS
     overlap = 0.5 if quality == "fast" else DEMUCS_OVERLAP
-    segment = DEMUCS_SEGMENT if DEMUCS_SEGMENT > 0 else (10 if HAS_GPU else 7)
+    requested_segment = DEMUCS_SEGMENT if DEMUCS_SEGMENT > 0 else 7.0
+    segment = min(float(requested_segment), DEMUCS_MAX_SEGMENT)
     command = [
         sys.executable,
         "-m",
@@ -777,7 +780,7 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
         "--overlap",
         str(overlap),
         "--segment",
-        str(int(segment)),
+        str(segment),
     ]
     if HAS_GPU:
         command.extend(["-d", "cuda"])
@@ -1331,6 +1334,8 @@ def friendly_error(message: str) -> str:
     if "Requested format is not available" in message:
         return "تعذر العثور على صيغة قابلة للتحميل لهذا الرابط. حدّث yt-dlp أو جرّب رابطاً آخر."
     if "فشل محرك عزل الصوت" in message:
+        if "longer segment" in message or "Maximum segment" in message:
+            return "تعذر تشغيل محرك العزل بسبب إعداد داخلي غير مناسب. تم ضبطه الآن؛ اضغط إعادة المحاولة."
         if "AssertionError" in message or "pad1d" in message:
             return "تعذر عزل الصوت لأن الملف قصير جداً أو صامت تقريباً. جرّب ملفاً أطول قليلاً أو مقطعاً واضح الصوت."
         if "Killed" in message or "out of memory" in message.lower() or "cannot allocate memory" in message.lower():
