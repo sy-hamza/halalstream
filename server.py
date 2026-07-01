@@ -38,7 +38,7 @@ JOBS_DIR = STORAGE / "jobs"
 TOOLS_DIR = ROOT / "tools"
 ASSETS_DIR = ROOT / "assets"
 MUSIC_RATIO_THRESHOLD = 0.13
-DEMUCS_MODEL = os.getenv("HALALSTREAM_DEMUCS_MODEL", "htdemucs_ft")
+DEMUCS_MODEL = os.getenv("HALALSTREAM_DEMUCS_MODEL", "htdemucs")
 DEMUCS_JOBS = int(os.getenv("HALALSTREAM_DEMUCS_JOBS", "1"))
 DEMUCS_SEGMENT = int(float(os.getenv("HALALSTREAM_DEMUCS_SEGMENT", "0")))
 DEMUCS_OVERLAP = float(os.getenv("HALALSTREAM_DEMUCS_OVERLAP", "0.1"))
@@ -738,14 +738,14 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
     out_dir = job_dir(job_id) / "separated"
     
     # Select Demucs model based on requested quality
-    model = "htdemucs_ft" if quality == "high" else DEMUCS_MODEL
+    model = DEMUCS_MODEL  # htdemucs - htdemucs_ft crashes T4 GPU with OOM
     if quality == "fast":
         model = "hdemucs_mmi"
         
     msg = "نعزل الصوت البشري عن مسار المعازف بالذكاء الاصطناعي. لن يستغرق الأمر سوى لحظات يسيرة."
         
     update_job(job_id, status="separating", stage="عزل الصوت", progress=42, message=msg)
-    # shifts=2 is a good balance for T4 GPU memory. The quality win comes from htdemucs_ft itself.
+    # shifts=2 is a good balance for T4 GPU memory.
     shifts = 2
     command = [
         sys.executable,
@@ -769,12 +769,9 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
         str(out_dir),
         str(audio),
     ])
-    # For htdemucs_ft, use segment=7 (close to optimal 7.8s) regardless of env var.
-    # For other models, respect the env var.
-    if model == "htdemucs_ft":
-        command.extend(["--segment", "7"])
-    elif DEMUCS_SEGMENT > 0:
-        command.extend(["--segment", str(int(DEMUCS_SEGMENT))])
+    # Use segment=7 for better context (default env was 3, too small)
+    segment = 7 if DEMUCS_SEGMENT < 7 else DEMUCS_SEGMENT
+    command.extend(["--segment", str(int(segment))])
     run_cmd(command, "فشل محرك عزل الصوت.", job_id=job_id)
 
     vocals, instrumental = find_demucs_stems(out_dir, audio.stem, model)
