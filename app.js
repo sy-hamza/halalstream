@@ -121,6 +121,12 @@ mediaForm.addEventListener("submit", async (event) => {
     setStage("receive");
     updateStatus("بدء الفحص", "نرسل المقطع إلى خادم المعالجة ونجهز مهمة المعالجة.", 4);
 
+    // Smoothly scroll down to the job panel so mobile users see progress instantly
+    const jobPanel = document.querySelector(".job-panel");
+    if (jobPanel) {
+      jobPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+
     const jobId = await createJob();
     currentJobId = jobId;
     try {
@@ -454,6 +460,9 @@ function renderJob(job) {
     setDownloadLink(cleanVideoDownload, job.download_urls?.video || job.download_url);
     setDownloadLink(cleanAudioDownload, job.download_urls?.audio);
     cleanCard.hidden = false;
+    window.setTimeout(() => {
+      cleanCard.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 150);
     return;
   }
 
@@ -469,15 +478,10 @@ function renderJob(job) {
 
     // Auto-scroll to the warning card so the user notices the action on mobile
     window.setTimeout(() => {
-      const rect = warningCard.getBoundingClientRect();
-      const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-      window.scrollTo({
-        top: rect.top + scrollTop - 80,
-        behavior: "smooth"
-      });
+      warningCard.scrollIntoView({ behavior: "smooth", block: "center" });
       // Add dynamic glowing attention highlight
       warningCard.style.animation = "pulseGlow 1.5s ease-in-out infinite";
-    }, 450);
+    }, 150);
     return;
   }
 
@@ -491,6 +495,9 @@ function renderJob(job) {
       completeRatioEl.hidden = false;
     }
     completeCard.hidden = false;
+    window.setTimeout(() => {
+      completeCard.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 150);
     return;
   }
 
@@ -498,6 +505,9 @@ function renderJob(job) {
     errorMessage.textContent = job.message || "حدث خطأ غير متوقع أثناء المعالجة.";
     renderLocalHelper(job);
     errorCard.hidden = false;
+    window.setTimeout(() => {
+      errorCard.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 150);
   }
 }
 

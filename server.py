@@ -459,6 +459,7 @@ def purify_job(job_id: str) -> None:
                 str(out),
             ],
             "فشل تركيب الصوت المنقّى على الفيديو.",
+            job_id=job_id,
         )
         update_job(
             job_id,
@@ -720,6 +721,7 @@ def extract_audio(job_id: str, original: Path) -> Path:
             str(audio),
         ],
         "فشل استخراج الصوت من المقطع.",
+        job_id=job_id,
     )
     if not audio.exists() or audio.stat().st_size == 0:
         raise RuntimeError("فشل استخراج الصوت: لم ينتج ffmpeg ملف التحليل الصوتي.")
@@ -805,9 +807,8 @@ def encode_audio(job_id: str, source_audio: Path, filename: str, progress: int, 
         "-vn",
     ]
     if filter_vocals:
-        # High-fidelity natural vocal presentation:
-        # 1) highpass=f=80 — cut sub-bass room rumble/low noise
-        cmd.extend(["-af", "highpass=f=80"])
+        # Reverted to original highly-optimized purification filters that balance vocal naturalness and music gating
+        cmd.extend(["-af", "highpass=f=120,lowpass=f=8000,agate=threshold=0.02:range=0.02:attack=20:release=200,dynaudnorm=g=5:p=0.71:m=10"])
         
     cmd.extend([
         "-c:a",
@@ -822,6 +823,7 @@ def encode_audio(job_id: str, source_audio: Path, filename: str, progress: int, 
     run_cmd(
         cmd,
         "فشل تجهيز ملف الصوت.",
+        job_id=job_id,
     )
     if not out.exists() or out.stat().st_size == 0:
         raise RuntimeError("فشل تجهيز ملف الصوت: لم ينتج ffmpeg ملفاً صالحاً.")
