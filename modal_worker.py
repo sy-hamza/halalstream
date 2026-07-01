@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import modal
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 
 
 MODAL_GPU = os.getenv("HALALSTREAM_MODAL_GPU", "T4")
@@ -39,38 +40,30 @@ image = (
 )
 
 app = modal.App("halalstream-purifier")
+web_app = FastAPI()
 cache_volume = modal.Volume.from_name("halalstream-demucs-cache", create_if_missing=True)
 
 
-@app.function(
-    image=image,
-    gpu=MODAL_GPU,
-    timeout=1800,
-    scaledown_window=60,
-    volumes={"/root/.cache": cache_volume},
-    secrets=[modal.Secret.from_name("halalstream-modal-secret")],
-)
-@modal.fastapi_endpoint(method="POST")
-async def purify(request):
-    from fastapi import HTTPException
-
+@web_app.post("/")
+async def purify(
+    file: UploadFile = File(...),
+    filename: str = Form("source.bin"),
+    original_filename: str = Form(""),
+    quality: str = Form("high"),
+    x_halalstream_secret: Optional[str] = Header(None, alias="x-halalstream-secret"),
+):
     secret = os.getenv("HALALSTREAM_MODAL_SECRET", "")
-    if not secret or request.headers.get("x-halalstream-secret") != secret:
+    if not secret or x_halalstream_secret != secret:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    form = await request.form()
-    upload = form.get("file")
-    if upload is None:
-        raise HTTPException(status_code=400, detail="Missing file")
-
-    source_name = str(form.get("filename") or getattr(upload, "filename", "source.bin"))
+    source_name = str(filename or original_filename or file.filename or "source.bin")
     suffix = Path(source_name).suffix or ".bin"
     with tempfile.TemporaryDirectory() as tmp_dir:
         workdir = Path(tmp_dir)
         source = workdir / f"source{suffix}"
         with source.open("wb") as target:
             while True:
-                chunk = await upload.read(1024 * 1024)
+                chunk = await file.read(1024 * 1024)
                 if not chunk:
                     break
                 target.write(chunk)
@@ -105,6 +98,19 @@ async def purify(request):
             "message": completion_message(result),
             "audio_base64": base64.b64encode(purified_audio.read_bytes()).decode("ascii"),
         }
+
+
+@app.function(
+    image=image,
+    gpu=MODAL_GPU,
+    timeout=1800,
+    scaledown_window=60,
+    volumes={"/root/.cache": cache_volume},
+    secrets=[modal.Secret.from_name("halalstream-modal-secret")],
+)
+@modal.asgi_app(label="purify-v3")
+def web():
+    return web_app
 
 
 def run_cmd(args: list[str], error_message: str) -> None:
