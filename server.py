@@ -40,7 +40,7 @@ ASSETS_DIR = ROOT / "assets"
 DEMUCS_MODEL = os.getenv("HALALSTREAM_DEMUCS_MODEL", "htdemucs")
 DEMUCS_JOBS = int(os.getenv("HALALSTREAM_DEMUCS_JOBS", "1"))
 DEMUCS_SEGMENT = int(float(os.getenv("HALALSTREAM_DEMUCS_SEGMENT", "0")))
-DEMUCS_MAX_SEGMENT = float(os.getenv("HALALSTREAM_DEMUCS_MAX_SEGMENT", "7.0"))
+DEMUCS_MAX_SEGMENT = int(float(os.getenv("HALALSTREAM_DEMUCS_MAX_SEGMENT", "7")))
 DEMUCS_OVERLAP = float(os.getenv("HALALSTREAM_DEMUCS_OVERLAP", "0.75"))
 # Dynamically adjust active jobs based on GPU availability
 try:
@@ -763,8 +763,8 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
     update_job(job_id, status="separating", stage="عزل الصوت", progress=42, message=msg)
     shifts = 1 if quality == "fast" else DEMUCS_SHIFTS
     overlap = 0.5 if quality == "fast" else DEMUCS_OVERLAP
-    requested_segment = DEMUCS_SEGMENT if DEMUCS_SEGMENT > 0 else 7.0
-    segment = min(float(requested_segment), DEMUCS_MAX_SEGMENT)
+    requested_segment = DEMUCS_SEGMENT if DEMUCS_SEGMENT > 0 else 7
+    segment = max(1, int(min(float(requested_segment), float(DEMUCS_MAX_SEGMENT))))
     command = [
         sys.executable,
         "-m",
