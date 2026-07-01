@@ -365,6 +365,7 @@ def create_job(
         "instrumental_ratio": None,
         "confidence": None,
         "residual_music_ratio": None,
+        "purification_mode": None,
         "original_path": None,
         "audio_path": None,
         "vocals_path": None,
@@ -490,6 +491,7 @@ def complete_direct_job(job_id: str, original: Path) -> None:
         instrumental_ratio=None,
         confidence=None,
         residual_music_ratio=None,
+        purification_mode=None,
         original_path=str(original),
         audio_path=None,
         vocals_path=None,
@@ -515,11 +517,11 @@ def purify_job(job_id: str) -> None:
             raise RuntimeError("لم نجد مسار الصوت البشري الناتج من نموذج العزل.")
 
         instrumental = Path(job["instrumental_path"]) if job.get("instrumental_path") else None
+        purification_result = None
         if instrumental and instrumental.exists():
             update_job(job_id, progress=84, message="نزيل بقايا المعازف من مسار الكلام مع الحفاظ على وضوح الصوت.")
-            purified_vocals = purify_vocal_stem(vocals, instrumental, job_id)
-            if VERIFY_PURIFIED_OUTPUT:
-                verify_purified_audio(job_id, purified_vocals, instrumental)
+            purification_result = purify_with_retries(job_id, vocals, instrumental)
+            purified_vocals = purification_result["path"]
         else:
             purified_vocals = vocals
 
@@ -556,7 +558,7 @@ def purify_job(job_id: str) -> None:
             status="complete",
             stage="تمت إزالة المعازف",
             progress=100,
-            message="تم بحمد الله عزل مسار المعازف وإعداد نسخة منقّاة قدر الإمكان. الملف جاهز للتحميل.",
+            message=completion_message(purification_result),
             purified_path=str(out),
             purified_audio_path=str(audio_out),
         )
@@ -905,7 +907,106 @@ def find_demucs_stems(out_dir: Path, stem_name: str, model_name: str = None) -> 
     return vocals, instrumental
 
 
-def purify_vocal_stem(vocals_path: Path, instrumental_path: Path, job_id: str) -> Path:
+def purify_with_retries(job_id: str, vocals_path: Path, instrumental_path: Path) -> Dict[str, Any]:
+    modes = ["balanced", "strong", "extreme"] if VERIFY_PURIFIED_OUTPUT else ["balanced"]
+    best: Optional[Dict[str, Any]] = None
+    for index, mode in enumerate(modes):
+        profile = purification_profile(mode)
+        update_job(
+            job_id,
+            progress=min(90, 84 + index * 2),
+            message=profile["message"],
+            purification_mode=mode,
+        )
+        candidate = purify_vocal_stem(vocals_path, instrumental_path, job_id, mode=mode)
+        ratio, absolute = estimate_residual_music_bleed(candidate, instrumental_path)
+        result = {
+            "path": candidate,
+            "mode": mode,
+            "ratio": ratio,
+            "absolute": absolute,
+            "safe": ratio < RESIDUAL_MUSIC_RATIO_THRESHOLD or absolute < RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD,
+        }
+        if best is None or ratio < best["ratio"]:
+            best = result
+        update_job(job_id, residual_music_ratio=round(ratio, 4), purification_mode=mode)
+        if result["safe"]:
+            return result
+        if index < len(modes) - 1:
+            update_job(
+                job_id,
+                message="بقي أثر موسيقي بعد المحاولة الحالية. نعيد التنقية بنمط أقوى.",
+            )
+    assert best is not None
+    update_job(
+        job_id,
+        residual_music_ratio=round(best["ratio"], 4),
+        purification_mode=best["mode"],
+        message="استخدمنا أقوى تنقية متاحة لهذا المقطع. قد يتأثر الصوت البشري لكننا نحاول تقليل المعازف قدر الإمكان.",
+    )
+    return best
+
+
+def completion_message(purification_result: Optional[Dict[str, Any]]) -> str:
+    if not purification_result:
+        return "تم بحمد الله عزل مسار المعازف وإعداد نسخة منقّاة قدر الإمكان. الملف جاهز للتحميل."
+    if purification_result.get("safe"):
+        return "تم بحمد الله عزل مسار المعازف وإعداد نسخة منقّاة قدر الإمكان. الملف جاهز للتحميل."
+    return "اكتملت أقوى محاولة تنقية متاحة. قد يتأثر الصوت البشري، لكننا أعدنا المحاولة لتقليل بقايا المعازف قدر الإمكان."
+
+
+def purification_profile(mode: str) -> Dict[str, Any]:
+    profiles = {
+        "balanced": {
+            "message": "نزيل بقايا المعازف من مسار الكلام مع الحفاظ على وضوح الصوت.",
+            "subtract_base": 0.55,
+            "subtract_bin": 0.75,
+            "subtract_frame": 0.65,
+            "subtract_share": 0.55,
+            "floor_base": 0.015,
+            "floor_voice": 0.16,
+            "dominant_share": 0.16,
+            "dominant_voice": 0.10,
+            "dominant_cap": 0.08,
+            "confident_share": 0.28,
+            "confident_voice": 0.20,
+            "confident_floor": 0.80,
+        },
+        "strong": {
+            "message": "بقي أثر موسيقي، نعيد التنقية بنمط أقوى.",
+            "subtract_base": 0.85,
+            "subtract_bin": 1.05,
+            "subtract_frame": 0.90,
+            "subtract_share": 0.75,
+            "floor_base": 0.004,
+            "floor_voice": 0.08,
+            "dominant_share": 0.22,
+            "dominant_voice": 0.16,
+            "dominant_cap": 0.04,
+            "confident_share": 0.38,
+            "confident_voice": 0.32,
+            "confident_floor": 0.65,
+        },
+        "extreme": {
+            "message": "نستخدم أقوى نمط متاح لإزالة بقايا العزف، وقد يتأثر الصوت البشري.",
+            "subtract_base": 1.15,
+            "subtract_bin": 1.35,
+            "subtract_frame": 1.10,
+            "subtract_share": 0.90,
+            "floor_base": 0.001,
+            "floor_voice": 0.035,
+            "dominant_share": 0.30,
+            "dominant_voice": 0.25,
+            "dominant_cap": 0.015,
+            "confident_share": 0.48,
+            "confident_voice": 0.45,
+            "confident_floor": 0.45,
+        },
+    }
+    return profiles.get(mode, profiles["balanced"])
+
+
+def purify_vocal_stem(vocals_path: Path, instrumental_path: Path, job_id: str, mode: str = "balanced") -> Path:
     """Reduce musical bleed inside the Demucs vocal stem without hard-cutting speech."""
     try:
         import numpy as np
@@ -922,6 +1023,7 @@ def purify_vocal_stem(vocals_path: Path, instrumental_path: Path, job_id: str) -
     if length <= 0:
         raise RuntimeError("تعذر تنقية الصوت: خرج العزل فارغ.")
 
+    profile = purification_profile(mode)
     vocals = vocals[:length]
     instrumental = match_audio_channels(instrumental[:length], vocals.shape[1])
 
@@ -942,6 +1044,7 @@ def purify_vocal_stem(vocals_path: Path, instrumental_path: Path, job_id: str) -
                 vocals[start:end, channel],
                 instrumental[start:end, channel],
                 sr,
+                profile,
             )
 
         weight = chunk_weight(end - start, overlap_len, fade_in=start > 0, fade_out=end < length)
@@ -954,7 +1057,7 @@ def purify_vocal_stem(vocals_path: Path, instrumental_path: Path, job_id: str) -
     purified = purified / np.maximum(weights, 1e-6)
     purified = soft_limit_audio(purified)
 
-    out = vocals_path.parent / "vocals_purified.wav"
+    out = vocals_path.parent / f"vocals_purified_{mode}.wav"
     sf.write(str(out), purified, sr, subtype="PCM_16")
     return out
 
@@ -985,7 +1088,7 @@ def chunk_weight(length: int, overlap_len: int, fade_in: bool, fade_out: bool):
     return weight
 
 
-def suppress_music_leakage(vocal_chunk, instrumental_chunk, sr: int):
+def suppress_music_leakage(vocal_chunk, instrumental_chunk, sr: int, profile: Dict[str, Any]):
     import numpy as np
 
     if len(vocal_chunk) == 0:
@@ -1006,8 +1109,12 @@ def suppress_music_leakage(vocal_chunk, instrumental_chunk, sr: int):
     voice_share = vocal_frame / (vocal_frame + instrumental_frame + eps)
 
     bin_instrumental_share = instrumental_mag / (vocal_mag + instrumental_mag + eps)
-    subtract_scale = (0.55 + 0.75 * bin_instrumental_share) * (0.65 + 0.55 * instrumental_share[:, None])
-    spectral_floor = 0.015 + 0.16 * voice_share[:, None] * (1.0 - bin_instrumental_share)
+    subtract_scale = (
+        profile["subtract_base"] + profile["subtract_bin"] * bin_instrumental_share
+    ) * (
+        profile["subtract_frame"] + profile["subtract_share"] * instrumental_share[:, None]
+    )
+    spectral_floor = profile["floor_base"] + profile["floor_voice"] * voice_share[:, None] * (1.0 - bin_instrumental_share)
     cleaned_mag = np.maximum(
         vocal_mag - instrumental_mag * subtract_scale,
         vocal_mag * spectral_floor,
@@ -1015,7 +1122,7 @@ def suppress_music_leakage(vocal_chunk, instrumental_chunk, sr: int):
 
     phase = vocal_spec / (vocal_mag + eps)
     cleaned = istft_np(cleaned_mag * phase, total_len=total_len, pad=pad, original_len=len(vocal_chunk), n_fft=n_fft, hop=hop)
-    frame_gain = voice_activity_gain(vocal_frame, instrumental_frame)
+    frame_gain = voice_activity_gain(vocal_frame, instrumental_frame, profile)
     cleaned *= interpolate_frame_gain(frame_gain, len(cleaned), hop)
     return np.clip(cleaned, -1.0, 1.0).astype(np.float32)
 
@@ -1057,7 +1164,7 @@ def istft_np(spec, total_len: int, pad: int, original_len: int, n_fft: int, hop:
     return output[pad:pad + original_len]
 
 
-def voice_activity_gain(vocal_frame, instrumental_frame):
+def voice_activity_gain(vocal_frame, instrumental_frame, profile: Dict[str, Any]):
     import numpy as np
 
     eps = 1e-8
@@ -1070,11 +1177,11 @@ def voice_activity_gain(vocal_frame, instrumental_frame):
     level_gain = np.clip((absolute_voice - 0.025) / 0.16, 0.0, 1.0)
     gain = np.maximum(share_gain, level_gain)
 
-    dominant_music = (share < 0.16) & (absolute_voice < 0.10)
-    gain[dominant_music] = np.minimum(gain[dominant_music], 0.08)
+    dominant_music = (share < profile["dominant_share"]) & (absolute_voice < profile["dominant_voice"])
+    gain[dominant_music] = np.minimum(gain[dominant_music], profile["dominant_cap"])
 
-    confident_voice = (share > 0.28) | (absolute_voice > 0.20)
-    gain[confident_voice] = np.maximum(gain[confident_voice], 0.80)
+    confident_voice = (share > profile["confident_share"]) | (absolute_voice > profile["confident_voice"])
+    gain[confident_voice] = np.maximum(gain[confident_voice], profile["confident_floor"])
 
     gain = max_filter_1d(np.clip(gain, 0.0, 1.0), radius=3)
     gain = smooth_1d(gain, radius=6)
@@ -1560,6 +1667,7 @@ def load_persisted_jobs() -> None:
             data.setdefault("purified_audio_path", None)
             data.setdefault("clean_audio_path", None)
             data.setdefault("residual_music_ratio", None)
+            data.setdefault("purification_mode", None)
             data.setdefault("queue_position", 0)
             data.setdefault("queue_length", 0)
             data.setdefault("estimated_wait_seconds", 0)
