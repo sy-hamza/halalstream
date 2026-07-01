@@ -769,7 +769,8 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
         str(out_dir),
         str(audio),
     ])
-    if DEMUCS_SEGMENT > 0:
+    # For htdemucs_ft, skip custom segment to let the model use its optimal default (~7.8s context)
+    if DEMUCS_SEGMENT > 0 and model != "htdemucs_ft":
         command.extend(["--segment", str(int(DEMUCS_SEGMENT))])
     run_cmd(command, "فشل محرك عزل الصوت.", job_id=job_id)
 
