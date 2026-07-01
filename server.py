@@ -37,11 +37,10 @@ STORAGE = Path(os.getenv("HALALSTREAM_STORAGE_DIR", ROOT / "storage")).resolve()
 JOBS_DIR = STORAGE / "jobs"
 TOOLS_DIR = ROOT / "tools"
 ASSETS_DIR = ROOT / "assets"
-MUSIC_RATIO_THRESHOLD = 0.13
 DEMUCS_MODEL = os.getenv("HALALSTREAM_DEMUCS_MODEL", "htdemucs")
 DEMUCS_JOBS = int(os.getenv("HALALSTREAM_DEMUCS_JOBS", "1"))
 DEMUCS_SEGMENT = int(float(os.getenv("HALALSTREAM_DEMUCS_SEGMENT", "0")))
-DEMUCS_OVERLAP = float(os.getenv("HALALSTREAM_DEMUCS_OVERLAP", "0.1"))
+DEMUCS_OVERLAP = float(os.getenv("HALALSTREAM_DEMUCS_OVERLAP", "0.75"))
 # Dynamically adjust active jobs based on GPU availability
 try:
     import torch
@@ -49,8 +48,12 @@ try:
 except ImportError:
     HAS_GPU = False
 
-default_max_jobs = "3" if HAS_GPU else "1"
+default_max_jobs = "1"
 MAX_ACTIVE_PROCESSING_JOBS = max(1, int(os.getenv("HALALSTREAM_MAX_ACTIVE_PROCESSING_JOBS", default_max_jobs)))
+MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_MUSIC_RATIO_THRESHOLD", "0.04"))
+MUSIC_ABSOLUTE_RMS_THRESHOLD = float(os.getenv("HALALSTREAM_MUSIC_ABSOLUTE_RMS_THRESHOLD", "0.006"))
+DEMUCS_SHIFTS = max(1, int(os.getenv("HALALSTREAM_DEMUCS_SHIFTS", "4" if HAS_GPU else "2")))
+ALLOW_UNCHECKED_DIRECT = os.getenv("HALALSTREAM_ALLOW_UNCHECKED_DIRECT", "").strip().lower() in {"1", "true", "yes"}
 HOSTED_SPACE = bool(os.getenv("SPACE_ID") or os.getenv("SPACE_HOST"))
 ALLOW_LINK_DOWNLOADS = os.getenv("HALALSTREAM_ALLOW_LINK_DOWNLOADS", "").strip().lower() in {"1", "true", "yes"}
 LINK_DOWNLOADS_RELIABLE = True
@@ -142,8 +145,11 @@ def health() -> Dict[str, Any]:
         "demucs": has_module("demucs"),
         "demucs_model": DEMUCS_MODEL,
         "demucs_jobs": DEMUCS_JOBS,
+        "demucs_shifts": DEMUCS_SHIFTS,
         "demucs_segment": DEMUCS_SEGMENT,
         "demucs_overlap": DEMUCS_OVERLAP,
+        "music_ratio_threshold": MUSIC_RATIO_THRESHOLD,
+        "strict_direct_bypass": not ALLOW_UNCHECKED_DIRECT,
         "max_active_processing_jobs": MAX_ACTIVE_PROCESSING_JOBS,
         "cuda_available": (lambda: __import__("torch").cuda.is_available() if has_module("torch") else False)(),
         "hosted_space": HOSTED_SPACE,
@@ -366,8 +372,9 @@ def process_job(job_id: str) -> None:
         purify_mode = job.get("purify_mode", "purify")
         quality = job.get("quality", "high")
 
-        if purify_mode == "direct":
-            # Direct bypass mode: mark clean instantly and return original path as clean path
+        if purify_mode == "direct" and ALLOW_UNCHECKED_DIRECT:
+            # Optional legacy bypass. Disabled by default so the server never
+            # releases unchecked media in the normal Islamic-safety flow.
             update_job(
                 job_id,
                 status="clean",
@@ -433,16 +440,15 @@ def purify_job(job_id: str) -> None:
         if not vocals.exists():
             raise RuntimeError("لم نجد مسار الصوت البشري الناتج من نموذج العزل.")
 
-        # Smart voice-activity masking: mute vocals where instrumentals dominate
         instrumental = Path(job["instrumental_path"]) if job.get("instrumental_path") else None
         if instrumental and instrumental.exists():
-            update_job(job_id, progress=84, message="نطبّق كتماً ذكياً على الأجزاء التي لا تحتوي على صوت بشري.")
-            masked_vocals = apply_voice_mask(vocals, instrumental, job_id)
+            update_job(job_id, progress=84, message="نزيل بقايا المعازف من مسار الكلام مع الحفاظ على وضوح الصوت.")
+            purified_vocals = purify_vocal_stem(vocals, instrumental, job_id)
         else:
-            masked_vocals = vocals
+            purified_vocals = vocals
 
         ffmpeg = require_ffmpeg()
-        audio_out = encode_audio(job_id, masked_vocals, "purified-audio.m4a", 86, "نجهز نسخة صوتية منقّاة وسريعة التحميل.", filter_vocals=True)
+        audio_out = encode_audio(job_id, purified_vocals, "purified-audio.m4a", 86, "نجهز نسخة صوتية منقّاة وسريعة التحميل.", filter_vocals=True)
         out = job_dir(job_id) / "purified.mp4"
         update_job(job_id, progress=92, message="نركّب الصوت المنقّى على المقطع دون إعادة ضغط الفيديو.")
         run_cmd(
@@ -753,8 +759,9 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
     msg = "نعزل الصوت البشري عن مسار المعازف بالذكاء الاصطناعي. لن يستغرق الأمر سوى لحظات يسيرة."
         
     update_job(job_id, status="separating", stage="عزل الصوت", progress=42, message=msg)
-    # shifts=2 is a good balance for T4 GPU memory.
-    shifts = 2
+    shifts = 1 if quality == "fast" else DEMUCS_SHIFTS
+    overlap = 0.5 if quality == "fast" else DEMUCS_OVERLAP
+    segment = DEMUCS_SEGMENT if DEMUCS_SEGMENT > 0 else (10 if HAS_GPU else 7)
     command = [
         sys.executable,
         "-m",
@@ -768,7 +775,9 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
         "--shifts",
         str(shifts),
         "--overlap",
-        "0.5",
+        str(overlap),
+        "--segment",
+        str(int(segment)),
     ]
     if HAS_GPU:
         command.extend(["-d", "cuda"])
@@ -777,9 +786,6 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
         str(out_dir),
         str(audio),
     ])
-    # Use segment=7 for better context (default env was 3, too small)
-    segment = 7 if DEMUCS_SEGMENT < 7 else DEMUCS_SEGMENT
-    command.extend(["--segment", str(int(segment))])
     run_cmd(command, "فشل محرك عزل الصوت.", job_id=job_id)
 
     vocals, instrumental = find_demucs_stems(out_dir, audio.stem, model)
@@ -805,71 +811,222 @@ def find_demucs_stems(out_dir: Path, stem_name: str, model_name: str = None) -> 
     return vocals, instrumental
 
 
-def apply_voice_mask(vocals_path: Path, instrumental_path: Path, job_id: str) -> Path:
-    """Compare vocals vs instrumentals energy per-frame.
-    Where instrumentals dominate (no singing), mute the vocals.
-    Returns path to the masked vocals WAV file."""
-    import struct as _struct
+def purify_vocal_stem(vocals_path: Path, instrumental_path: Path, job_id: str) -> Path:
+    """Reduce musical bleed inside the Demucs vocal stem without hard-cutting speech."""
+    try:
+        import numpy as np
+        import soundfile as sf
+    except Exception as exc:  # pragma: no cover - reported as a runtime dependency error
+        raise RuntimeError("تنقص مكتبات تنقية الصوت المتقدمة: numpy و soundfile.") from exc
 
-    frame_ms = 100  # 100ms analysis frames
-    masked_out = vocals_path.parent / "vocals_masked.wav"
+    vocals, sr = sf.read(str(vocals_path), always_2d=True, dtype="float32")
+    instrumental, instrumental_sr = sf.read(str(instrumental_path), always_2d=True, dtype="float32")
+    if sr != instrumental_sr:
+        raise RuntimeError("تعذر تنقية الصوت: معدل العينة بين مساري العزل غير متطابق.")
 
-    with wave.open(str(vocals_path), "rb") as vw:
-        params = vw.getparams()
-        rate = vw.getframerate()
-        n_ch = vw.getnchannels()
-        sw = vw.getsampwidth()
-        v_raw = vw.readframes(vw.getnframes())
+    length = min(len(vocals), len(instrumental))
+    if length <= 0:
+        raise RuntimeError("تعذر تنقية الصوت: خرج العزل فارغ.")
 
-    with wave.open(str(instrumental_path), "rb") as iw:
-        i_raw = iw.readframes(iw.getnframes())
+    vocals = vocals[:length]
+    instrumental = match_audio_channels(instrumental[:length], vocals.shape[1])
 
-    # Parse samples (16-bit signed)
-    fmt = f"<{len(v_raw) // sw}h"
-    v_samples = list(_struct.unpack(fmt, v_raw))
-    fmt2 = f"<{len(i_raw) // sw}h"
-    i_samples = list(_struct.unpack(fmt2, i_raw))
+    chunk_seconds = max(10.0, float(os.getenv("HALALSTREAM_SPECTRAL_CHUNK_SECONDS", "30")))
+    chunk_len = max(sr * 5, int(sr * chunk_seconds))
+    overlap_len = min(sr, max(1, chunk_len // 4))
+    step = max(1, chunk_len - overlap_len)
 
-    frame_size = int(rate * n_ch * frame_ms / 1000)  # samples per frame (all channels)
-    n_frames = len(v_samples) // frame_size
+    purified = np.zeros_like(vocals, dtype=np.float32)
+    weights = np.zeros((length, 1), dtype=np.float32)
 
-    for f_idx in range(n_frames):
-        start = f_idx * frame_size
-        end = start + frame_size
+    start = 0
+    while start < length:
+        end = min(length, start + chunk_len)
+        chunk_out = np.empty((end - start, vocals.shape[1]), dtype=np.float32)
+        for channel in range(vocals.shape[1]):
+            chunk_out[:, channel] = suppress_music_leakage(
+                vocals[start:end, channel],
+                instrumental[start:end, channel],
+                sr,
+            )
 
-        # Compute RMS for this frame
-        v_chunk = v_samples[start:end]
-        i_chunk = i_samples[start:end] if end <= len(i_samples) else i_samples[start:]
+        weight = chunk_weight(end - start, overlap_len, fade_in=start > 0, fade_out=end < length)
+        purified[start:end] += chunk_out * weight
+        weights[start:end] += weight
+        if end >= length:
+            break
+        start += step
 
-        v_rms = (sum(s * s for s in v_chunk) / max(len(v_chunk), 1)) ** 0.5
-        i_rms = (sum(s * s for s in i_chunk) / max(len(i_chunk), 1)) ** 0.5
+    purified = purified / np.maximum(weights, 1e-6)
+    purified = soft_limit_audio(purified)
 
-        # If instrumental energy is more than 60% of total, this is a music-only section
-        total_e = v_rms + i_rms
-        if total_e > 0:
-            vocal_ratio = v_rms / total_e
-        else:
-            vocal_ratio = 1.0
+    out = vocals_path.parent / "vocals_purified.wav"
+    sf.write(str(out), purified, sr, subtype="PCM_16")
+    return out
 
-        # Mute if vocals are weak relative to instrumentals
-        # vocal_ratio < 0.4 means instrumentals are dominant (>60%)
-        if vocal_ratio < 0.4:
-            # Full mute - this is a music-only section
-            for j in range(start, min(end, len(v_samples))):
-                v_samples[j] = 0
-        elif vocal_ratio < 0.5:
-            # Partial attenuation - transitional zone
-            gain = (vocal_ratio - 0.4) / 0.1  # 0.0 to 1.0
-            for j in range(start, min(end, len(v_samples))):
-                v_samples[j] = int(v_samples[j] * gain)
 
-    # Write masked vocals
-    out_raw = _struct.pack(f"<{len(v_samples)}h", *v_samples)
-    with wave.open(str(masked_out), "wb") as wf:
-        wf.setparams(params)
-        wf.writeframes(out_raw)
+def match_audio_channels(audio, channels: int):
+    import numpy as np
 
-    return masked_out
+    if audio.ndim == 1:
+        audio = audio[:, None]
+    if audio.shape[1] == channels:
+        return audio
+    if audio.shape[1] == 1:
+        return np.repeat(audio, channels, axis=1)
+    if channels == 1:
+        return np.mean(audio, axis=1, keepdims=True)
+    return audio[:, :channels]
+
+
+def chunk_weight(length: int, overlap_len: int, fade_in: bool, fade_out: bool):
+    import numpy as np
+
+    weight = np.ones((length, 1), dtype=np.float32)
+    fade = min(overlap_len, length // 2)
+    if fade_in and fade > 1:
+        weight[:fade, 0] *= np.linspace(0.0, 1.0, fade, dtype=np.float32)
+    if fade_out and fade > 1:
+        weight[-fade:, 0] *= np.linspace(1.0, 0.0, fade, dtype=np.float32)
+    return weight
+
+
+def suppress_music_leakage(vocal_chunk, instrumental_chunk, sr: int):
+    import numpy as np
+
+    if len(vocal_chunk) == 0:
+        return vocal_chunk.astype(np.float32)
+
+    n_fft = 2048
+    hop = 512
+    eps = 1e-8
+
+    vocal_spec, total_len, pad = stft_np(vocal_chunk, n_fft=n_fft, hop=hop)
+    instrumental_spec, _, _ = stft_np(instrumental_chunk, n_fft=n_fft, hop=hop)
+    vocal_mag = np.abs(vocal_spec).astype(np.float32)
+    instrumental_mag = np.abs(instrumental_spec).astype(np.float32)
+
+    vocal_frame = np.sqrt(np.mean(vocal_mag * vocal_mag, axis=1) + eps)
+    instrumental_frame = np.sqrt(np.mean(instrumental_mag * instrumental_mag, axis=1) + eps)
+    instrumental_share = instrumental_frame / (vocal_frame + instrumental_frame + eps)
+    voice_share = vocal_frame / (vocal_frame + instrumental_frame + eps)
+
+    bin_instrumental_share = instrumental_mag / (vocal_mag + instrumental_mag + eps)
+    subtract_scale = (0.55 + 0.75 * bin_instrumental_share) * (0.65 + 0.55 * instrumental_share[:, None])
+    spectral_floor = 0.015 + 0.16 * voice_share[:, None] * (1.0 - bin_instrumental_share)
+    cleaned_mag = np.maximum(
+        vocal_mag - instrumental_mag * subtract_scale,
+        vocal_mag * spectral_floor,
+    )
+
+    phase = vocal_spec / (vocal_mag + eps)
+    cleaned = istft_np(cleaned_mag * phase, total_len=total_len, pad=pad, original_len=len(vocal_chunk), n_fft=n_fft, hop=hop)
+    frame_gain = voice_activity_gain(vocal_frame, instrumental_frame)
+    cleaned *= interpolate_frame_gain(frame_gain, len(cleaned), hop)
+    return np.clip(cleaned, -1.0, 1.0).astype(np.float32)
+
+
+def stft_np(signal, n_fft: int, hop: int):
+    import numpy as np
+
+    signal = np.asarray(signal, dtype=np.float32)
+    pad = n_fft // 2
+    pad_mode = "reflect" if len(signal) > pad else "constant"
+    padded = np.pad(signal, (pad, pad), mode=pad_mode)
+    frames = int(np.ceil(max(0, len(padded) - n_fft) / hop)) + 1
+    total_len = (frames - 1) * hop + n_fft
+    if total_len > len(padded):
+        padded = np.pad(padded, (0, total_len - len(padded)), mode="constant")
+
+    window = np.hanning(n_fft).astype(np.float32)
+    spec = np.empty((frames, n_fft // 2 + 1), dtype=np.complex64)
+    for idx in range(frames):
+        start = idx * hop
+        spec[idx] = np.fft.rfft(padded[start:start + n_fft] * window)
+    return spec, total_len, pad
+
+
+def istft_np(spec, total_len: int, pad: int, original_len: int, n_fft: int, hop: int):
+    import numpy as np
+
+    window = np.hanning(n_fft).astype(np.float32)
+    output = np.zeros(total_len, dtype=np.float32)
+    norm = np.zeros(total_len, dtype=np.float32)
+    for idx in range(spec.shape[0]):
+        start = idx * hop
+        frame = np.fft.irfft(spec[idx], n=n_fft).astype(np.float32) * window
+        output[start:start + n_fft] += frame
+        norm[start:start + n_fft] += window * window
+
+    active = norm > 1e-8
+    output[active] /= norm[active]
+    return output[pad:pad + original_len]
+
+
+def voice_activity_gain(vocal_frame, instrumental_frame):
+    import numpy as np
+
+    eps = 1e-8
+    nonzero = vocal_frame[vocal_frame > eps]
+    reference = float(np.percentile(nonzero, 90)) if nonzero.size else 1.0
+    absolute_voice = vocal_frame / (reference + eps)
+    share = vocal_frame / (vocal_frame + instrumental_frame + eps)
+
+    share_gain = np.clip((share - 0.05) / 0.22, 0.0, 1.0)
+    level_gain = np.clip((absolute_voice - 0.025) / 0.16, 0.0, 1.0)
+    gain = np.maximum(share_gain, level_gain)
+
+    dominant_music = (share < 0.16) & (absolute_voice < 0.10)
+    gain[dominant_music] = np.minimum(gain[dominant_music], 0.08)
+
+    confident_voice = (share > 0.28) | (absolute_voice > 0.20)
+    gain[confident_voice] = np.maximum(gain[confident_voice], 0.80)
+
+    gain = max_filter_1d(np.clip(gain, 0.0, 1.0), radius=3)
+    gain = smooth_1d(gain, radius=6)
+    return gain.astype(np.float32)
+
+
+def interpolate_frame_gain(frame_gain, length: int, hop: int):
+    import numpy as np
+
+    if len(frame_gain) == 1:
+        return np.full(length, frame_gain[0], dtype=np.float32)
+    centers = np.arange(len(frame_gain), dtype=np.float32) * hop
+    samples = np.arange(length, dtype=np.float32)
+    return np.interp(samples, centers, frame_gain, left=frame_gain[0], right=frame_gain[-1]).astype(np.float32)
+
+
+def max_filter_1d(values, radius: int):
+    import numpy as np
+
+    if radius <= 0 or len(values) == 0:
+        return values
+    padded = np.pad(values, (radius, radius), mode="edge")
+    stacked = [padded[offset:offset + len(values)] for offset in range(radius * 2 + 1)]
+    return np.max(np.vstack(stacked), axis=0)
+
+
+def smooth_1d(values, radius: int):
+    import numpy as np
+
+    if radius <= 0 or len(values) == 0:
+        return values
+    kernel = np.ones(radius * 2 + 1, dtype=np.float32)
+    kernel /= np.sum(kernel)
+    padded = np.pad(values, (radius, radius), mode="edge")
+    return np.convolve(padded, kernel, mode="valid")
+
+
+def soft_limit_audio(audio):
+    import numpy as np
+
+    audio = np.asarray(audio, dtype=np.float32)
+    audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
+    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+    if peak > 0.98:
+        audio = audio * (0.98 / peak)
+    return np.clip(audio, -0.98, 0.98).astype(np.float32)
 
 
 def encode_audio(job_id: str, source_audio: Path, filename: str, progress: int, message: str, filter_vocals: bool = False) -> Path:
@@ -885,9 +1042,9 @@ def encode_audio(job_id: str, source_audio: Path, filename: str, progress: int, 
         "-vn",
     ]
     if filter_vocals:
-        # CRITICAL: Do NOT put dynaudnorm after agate - it boosts silenced sections back up!
-        # Chain: bandpass to vocal range → gate silences non-vocal sections → gentle normalize at end
-        cmd.extend(["-af", "highpass=f=100,lowpass=f=8500,agate=threshold=0.02:range=0.0001:attack=10:release=250"])
+        # Keep only a gentle speech band-limit here. Hard gates caused audible
+        # word dropouts and can bring musical artifacts forward after encoding.
+        cmd.extend(["-af", "highpass=f=70,lowpass=f=9500"])
         
     cmd.extend([
         "-c:a",
@@ -914,7 +1071,11 @@ def estimate_music_ratio(audio: Path, vocals: Path, instrumental: Path) -> tuple
     vocal_rms = rms_wav(vocals)
     instrumental_rms = rms_wav(instrumental)
     denominator = max(vocal_rms + instrumental_rms, total, 1.0)
-    ratio = instrumental_rms / denominator
+    raw_ratio = instrumental_rms / denominator
+    normalized_instrumental = instrumental_rms / 32768.0
+    ratio = raw_ratio
+    if normalized_instrumental < MUSIC_ABSOLUTE_RMS_THRESHOLD:
+        ratio = min(raw_ratio, MUSIC_RATIO_THRESHOLD * 0.75)
     confidence = min(0.98, 0.55 + abs(ratio - MUSIC_RATIO_THRESHOLD) * 2.5)
     return ratio, confidence
 
@@ -951,6 +1112,10 @@ def ensure_runtime() -> None:
         missing.append("ffmpeg")
     if not has_module("demucs"):
         missing.append("demucs")
+    if not has_module("numpy"):
+        missing.append("numpy")
+    if not has_module("soundfile"):
+        missing.append("soundfile")
     if missing:
         raise RuntimeError("تنقص بيئة المعالجة: " + "، ".join(missing))
 

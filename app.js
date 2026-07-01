@@ -280,8 +280,8 @@ async function checkHealth() {
     hostingNote.hidden = linkDownloadsReliable;
     serverPill.classList.toggle("is-ready", serverReady);
     serverPill.classList.toggle("is-error", !serverReady);
-    engineMode.textContent = "جودة عالية";
-    engineJobs.textContent = linkDownloadsReliable ? "ثابت" : "رفع الملفات أفضل";
+    engineMode.textContent = "تنقية صارمة";
+    engineJobs.textContent = linkDownloadsReliable ? "آمن" : "رفع الملفات أفضل";
 
     if (serverReady) {
       if (healthPollTimer) {
@@ -491,7 +491,7 @@ function renderJob(job) {
     const ratioPct = Math.round((job.instrumental_ratio || 0) * 100);
     const completeRatioEl = document.querySelector("#complete-ratio");
     if (completeRatioEl) {
-      completeRatioEl.textContent = `نسبة المعازف قبل التنقية: ${ratioPct}% | بعد التنقية: 0% (منقّى بالكامل)`;
+      completeRatioEl.textContent = `نسبة المعازف قبل التنقية: ${ratioPct}% | طُبّقت تنقية صارمة على مسار الكلام`;
       completeRatioEl.hidden = false;
     }
     completeCard.hidden = false;

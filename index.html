@@ -137,15 +137,15 @@
                 <label class="option-row">
                   <input type="radio" name="purify_mode" value="direct" />
                   <span class="option-label">
-                    <span class="option-name">تحميل مباشر وسريع (بدون عزل)</span>
-                    <span class="option-desc">تنزيل فوري للمقطع دون فحص أو عزل بالخادم (خلال ثوانٍ).</span>
+                    <span class="option-name">فحص أمان ثم تحميل عند السلامة</span>
+                    <span class="option-desc">لا يغيّر الصوت إذا ثبت خلوه، ويتوقف تلقائياً إذا ظهرت معازف.</span>
                   </span>
                 </label>
 
                 <!-- تحذير التحميل المباشر -->
                 <div class="warning-box" id="direct-warning-box" hidden>
                   ⚠️ <strong>تنبيه الأمان والعهد:</strong> هل أنت متأكد تماماً أن هذا المقطع خالي من أي موسيقى أو معازف؟
-                  باختيارك هذا، فإنك تتحمل المسؤولية الكاملة وتؤكد خلوه قبل التحميل.
+                  سيظل الخادم يفحص المقطع قبل السماح بالتحميل، ولن يطلق الملف إذا ظهر مسار معازف.
                 </div>
 
               </div>
