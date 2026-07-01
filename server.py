@@ -745,8 +745,8 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
     msg = "نعزل الصوت البشري عن مسار المعازف بالذكاء الاصطناعي. لن يستغرق الأمر سوى لحظات يسيرة."
         
     update_job(job_id, status="separating", stage="عزل الصوت", progress=42, message=msg)
-    # More shifts = better quality but slower. Use 5 for htdemucs_ft, 2 for others.
-    shifts = 5 if model == "htdemucs_ft" else 2
+    # shifts=2 is a good balance for T4 GPU memory. The quality win comes from htdemucs_ft itself.
+    shifts = 2
     command = [
         sys.executable,
         "-m",
@@ -769,8 +769,11 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
         str(out_dir),
         str(audio),
     ])
-    # For htdemucs_ft, skip custom segment to let the model use its optimal default (~7.8s context)
-    if DEMUCS_SEGMENT > 0 and model != "htdemucs_ft":
+    # For htdemucs_ft, use segment=7 (close to optimal 7.8s) regardless of env var.
+    # For other models, respect the env var.
+    if model == "htdemucs_ft":
+        command.extend(["--segment", "7"])
+    elif DEMUCS_SEGMENT > 0:
         command.extend(["--segment", str(int(DEMUCS_SEGMENT))])
     run_cmd(command, "فشل محرك عزل الصوت.", job_id=job_id)
 
