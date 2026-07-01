@@ -27,6 +27,17 @@ VOICELESS_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_VOICELESS_MUSIC_R
 STRICT_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_STRICT_MUSIC_RATIO_THRESHOLD", "0.45"))
 STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD", "0.06"))
 STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD = float(os.getenv("HALALSTREAM_STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD", "0.004"))
+UVR_RESCUE_ENABLED = os.getenv("HALALSTREAM_UVR_RESCUE_ENABLED", "1") != "0"
+UVR_RESCUE_MODEL = os.getenv("HALALSTREAM_UVR_RESCUE_MODEL", "model_bs_roformer_ep_317_sdr_12.9755.ckpt")
+UVR_RESCUE_MODELS = tuple(
+    model.strip()
+    for model in os.getenv(
+        "HALALSTREAM_UVR_RESCUE_MODELS",
+        UVR_RESCUE_MODEL,
+    ).split(",")
+    if model.strip()
+)
+UVR_MODEL_DIR = os.getenv("HALALSTREAM_UVR_MODEL_DIR", "/root/.cache/audio-separator-models")
 
 image = (
     modal.Image.from_registry(
@@ -38,7 +49,9 @@ image = (
         "fastapi[standard]==0.115.6",
         "python-multipart==0.0.20",
         "demucs==4.0.1",
+        "audio-separator[cpu]==0.18.0",
         "numpy==1.26.4",
+        "scipy==1.13.1",
         "soundfile==0.13.1",
     )
 )
@@ -93,8 +106,14 @@ async def purify(
         if is_voiceless_music(ratio):
             result = silence_result_for_voiceless_music(workdir, audio)
         else:
-            result = purify_with_retries(workdir, vocals, instrumental, source_ratio=ratio)
-        purified_audio = encode_audio(workdir, result["path"], "purified-audio.m4a", filter_vocals=True)
+            result = purify_with_retries(workdir, audio, vocals, instrumental, source_ratio=ratio)
+        purified_audio = encode_audio(
+            workdir,
+            result["path"],
+            "purified-audio.m4a",
+            filter_vocals=True,
+            speech_only=bool(result.get("speech_rescue")),
+        )
         return {
             "status": "complete",
             "has_music": True,
@@ -189,10 +208,12 @@ def separate_vocals(workdir: Path, audio: Path) -> tuple[Path, Path]:
     return vocals, instrumental
 
 
-def encode_audio(workdir: Path, source_audio: Path, filename: str, filter_vocals: bool) -> Path:
+def encode_audio(workdir: Path, source_audio: Path, filename: str, filter_vocals: bool, speech_only: bool = False) -> Path:
     out = workdir / filename
     cmd = ["ffmpeg", "-y", "-i", str(source_audio), "-vn"]
-    if filter_vocals:
+    if speech_only:
+        cmd.extend(["-af", "highpass=f=120,lowpass=f=4200,afftdn=nf=-25"])
+    elif filter_vocals:
         cmd.extend(["-af", "highpass=f=70,lowpass=f=9500"])
     cmd.extend(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out)])
     run_cmd(cmd, "Failed to encode audio.")
@@ -256,6 +277,125 @@ def silence_result_for_persistent_music(workdir: Path, reference_audio: Path, be
     }
 
 
+def speech_rescue_result_for_persistent_music(
+    workdir: Path,
+    vocals_path: Path,
+    instrumental_path: Path,
+    best: Dict[str, Any],
+) -> Dict[str, Any]:
+    candidate = purify_vocal_stem(vocals_path, instrumental_path, workdir, "speech_rescue")
+    ratio, absolute = estimate_residual_music_bleed(candidate, instrumental_path)
+    return {
+        "path": candidate,
+        "mode": "speech_rescue",
+        "ratio": ratio,
+        "absolute": absolute,
+        "safe": ratio < RESIDUAL_MUSIC_RATIO_THRESHOLD or absolute < RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD,
+        "speech_rescue": True,
+        "previous_ratio": float(best.get("ratio") or 0.0),
+    }
+
+
+def uvr_rescue_result_for_persistent_music(
+    workdir: Path,
+    source_audio: Path,
+    vocals_path: Path,
+    instrumental_path: Path,
+    best: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not UVR_RESCUE_ENABLED:
+        raise RuntimeError("UVR rescue is disabled.")
+
+    candidates: list[tuple[Path, float, float, str]] = []
+    for index, model_filename in enumerate(UVR_RESCUE_MODELS):
+        try:
+            uvr_vocals = separate_vocals_with_uvr(workdir, source_audio, model_filename, index)
+            add_rescue_candidates(candidates, workdir, uvr_vocals, instrumental_path, "uvr_rescue")
+            if best_candidate_is_strict_safe(candidates):
+                break
+        except Exception:
+            continue
+
+    try:
+        add_rescue_candidates(candidates, workdir, vocals_path, instrumental_path, "demucs")
+    except Exception:
+        pass
+
+    if not candidates:
+        raise RuntimeError("UVR rescue finished without usable candidates.")
+
+    path, ratio, absolute, mode = min(candidates, key=lambda item: (item[1], item[2]))
+    return {
+        "path": path,
+        "mode": mode,
+        "ratio": ratio,
+        "absolute": absolute,
+        "safe": ratio < STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD or absolute < STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD,
+        "uvr_rescue": True,
+        "speech_rescue": "speech_rescue" in mode,
+        "previous_ratio": float(best.get("ratio") or 0.0),
+    }
+
+
+def add_rescue_candidates(
+    candidates: list[tuple[Path, float, float, str]],
+    workdir: Path,
+    vocals_path: Path,
+    instrumental_path: Path,
+    mode_prefix: str,
+) -> None:
+    raw_ratio, raw_absolute = estimate_residual_music_bleed(vocals_path, instrumental_path)
+    candidates.append((vocals_path, raw_ratio, raw_absolute, mode_prefix))
+    raw_rms = max(rms_wav(vocals_path), 1.0)
+    for mode in ("uvr_cleanup", "speech_rescue", "speech_rescue_hard"):
+        try:
+            cleaned = purify_vocal_stem(vocals_path, instrumental_path, workdir, mode)
+            cleaned_ratio, cleaned_absolute = estimate_residual_music_bleed(cleaned, instrumental_path)
+            cleaned_rms = rms_wav(cleaned)
+            if cleaned_rms >= raw_rms * 0.16:
+                candidates.append((cleaned, cleaned_ratio, cleaned_absolute, f"{mode_prefix}_{mode}"))
+        except Exception:
+            continue
+
+
+def best_candidate_is_strict_safe(candidates: list[tuple[Path, float, float, str]]) -> bool:
+    if not candidates:
+        return False
+    _, ratio, absolute, _ = min(candidates, key=lambda item: (item[1], item[2]))
+    return ratio < STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD or absolute < STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD
+
+
+def separate_vocals_with_uvr(workdir: Path, source_audio: Path, model_filename: str, index: int) -> Path:
+    import logging
+    from audio_separator.separator import Separator
+
+    out_dir = workdir / f"uvr_{index}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    separator = Separator(
+        log_level=logging.WARNING,
+        model_file_dir=UVR_MODEL_DIR,
+        output_dir=str(out_dir),
+        output_format="WAV",
+        output_single_stem="Vocals",
+        normalization_threshold=0.92,
+        sample_rate=44100,
+        mdxc_params={"segment_size": 256, "batch_size": 1, "overlap": 8},
+    )
+    separator.load_model(model_filename=model_filename)
+    output_files = separator.separate(str(source_audio))
+    candidates = []
+    for item in output_files:
+        path = Path(item)
+        if not path.is_absolute():
+            path = out_dir / path
+        if path.exists() and path.suffix.lower() == ".wav":
+            candidates.append(path)
+    candidates.extend(path for path in out_dir.glob("*.wav") if "vocal" in path.name.lower())
+    if not candidates:
+        raise RuntimeError("UVR rescue finished without a vocal stem.")
+    return sorted(candidates, key=lambda path: ("vocal" not in path.name.lower(), len(path.name)))[0]
+
+
 def write_silence_like(reference_audio: Path, out: Path) -> Path:
     import numpy as np
     import soundfile as sf
@@ -277,7 +417,7 @@ def write_silence_like(reference_audio: Path, out: Path) -> Path:
     return out
 
 
-def purify_with_retries(workdir: Path, vocals_path: Path, instrumental_path: Path, source_ratio: float = 0.0) -> Dict[str, Any]:
+def purify_with_retries(workdir: Path, source_audio: Path, vocals_path: Path, instrumental_path: Path, source_ratio: float = 0.0) -> Dict[str, Any]:
     best: Optional[Dict[str, Any]] = None
     strict_source = source_ratio >= STRICT_MUSIC_RATIO_THRESHOLD
     for mode in ["balanced", "strong", "extreme"]:
@@ -299,7 +439,10 @@ def purify_with_retries(workdir: Path, vocals_path: Path, instrumental_path: Pat
         best["ratio"] >= STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD
         or best["absolute"] >= STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD
     ):
-        return silence_result_for_persistent_music(workdir, vocals_path, best)
+        try:
+            return uvr_rescue_result_for_persistent_music(workdir, source_audio, vocals_path, instrumental_path, best)
+        except Exception:
+            return speech_rescue_result_for_persistent_music(workdir, vocals_path, instrumental_path, best)
     return best
 
 
@@ -308,6 +451,10 @@ def completion_message(result: Dict[str, Any]) -> str:
         return "لم نجد صوتاً بشرياً موثوقاً بعد عزل المعازف، لذلك أخرجنا مساراً صامتاً بدل تمرير الموسيقى."
     if result.get("silenced"):
         return "بقي أثر موسيقي واضح بعد أقوى تنقية، لذلك أخرجنا مساراً صامتاً احتياطاً بدل تمرير المعازف."
+    if result.get("speech_rescue"):
+        return "بقي أثر موسيقي بعد أقوى تنقية، فشغلنا وضع إنقاذ الكلام بفلترة أشد بدل كتم الصوت كاملاً."
+    if result.get("uvr_rescue"):
+        return "بقي أثر موسيقي بعد تنقية Demucs، فشغلنا نموذج UVR/RoFormer أقوى للحفاظ على الصوت البشري بدل كتمه."
     if result.get("safe"):
         return "تم بحمد الله إعداد نسخة منقّاة عبر عامل Modal. الملف جاهز للتحميل."
     return "اكتملت أقوى محاولة تنقية متاحة عبر Modal. قد يتأثر الصوت البشري، لكننا أعدنا المحاولة لتقليل بقايا المعازف قدر الإمكان."
@@ -318,13 +465,18 @@ def purification_profile(mode: str) -> Dict[str, Any]:
         "balanced": (0.55, 0.75, 0.65, 0.55, 0.015, 0.16, 0.16, 0.10, 0.08, 0.28, 0.20, 0.80),
         "strong": (0.85, 1.05, 0.90, 0.75, 0.004, 0.08, 0.22, 0.16, 0.04, 0.38, 0.32, 0.65),
         "extreme": (1.15, 1.35, 1.10, 0.90, 0.001, 0.035, 0.30, 0.25, 0.015, 0.48, 0.45, 0.45),
+        "uvr_cleanup": (1.05, 1.25, 1.00, 0.85, 0.004, 0.055, 0.32, 0.28, 0.025, 0.52, 0.50, 0.48),
+        "speech_rescue": (1.75, 2.20, 1.55, 1.30, 0.0, 0.0, 0.52, 0.45, 0.0, 0.68, 0.70, 0.34),
+        "speech_rescue_hard": (2.05, 2.55, 1.75, 1.50, 0.0, 0.0, 0.60, 0.52, 0.0, 0.78, 0.80, 0.26),
     }
     keys = [
         "subtract_base", "subtract_bin", "subtract_frame", "subtract_share",
         "floor_base", "floor_voice", "dominant_share", "dominant_voice",
         "dominant_cap", "confident_share", "confident_voice", "confident_floor",
     ]
-    return dict(zip(keys, profiles.get(mode, profiles["balanced"])))
+    profile = dict(zip(keys, profiles.get(mode, profiles["balanced"])))
+    profile["speech_rescue"] = mode.startswith("speech_rescue")
+    return profile
 
 
 def purify_vocal_stem(vocals_path: Path, instrumental_path: Path, workdir: Path, mode: str) -> Path:
@@ -465,6 +617,11 @@ def voice_activity_gain(vocal_frame, instrumental_frame, profile: Dict[str, Any]
     share_gain = np.clip((share - 0.05) / 0.22, 0.0, 1.0)
     level_gain = np.clip((absolute_voice - 0.025) / 0.16, 0.0, 1.0)
     gain = np.maximum(share_gain, level_gain)
+    if profile.get("speech_rescue"):
+        strong_share = share > 0.58
+        confident_share = share > 0.72
+        gain = np.where(strong_share, gain, gain * 0.05)
+        gain = np.where(confident_share, np.maximum(gain, 0.36), gain)
     dominant = (share < profile["dominant_share"]) & (absolute_voice < profile["dominant_voice"])
     gain[dominant] = np.minimum(gain[dominant], profile["dominant_cap"])
     confident = (share > profile["confident_share"]) | (absolute_voice > profile["confident_voice"])
