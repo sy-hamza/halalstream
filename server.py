@@ -40,7 +40,7 @@ ASSETS_DIR = ROOT / "assets"
 MUSIC_RATIO_THRESHOLD = 0.13
 DEMUCS_MODEL = os.getenv("HALALSTREAM_DEMUCS_MODEL", "htdemucs_ft")
 DEMUCS_JOBS = int(os.getenv("HALALSTREAM_DEMUCS_JOBS", "1"))
-DEMUCS_SEGMENT = int(float(os.getenv("HALALSTREAM_DEMUCS_SEGMENT", "3")))
+DEMUCS_SEGMENT = int(float(os.getenv("HALALSTREAM_DEMUCS_SEGMENT", "0")))
 DEMUCS_OVERLAP = float(os.getenv("HALALSTREAM_DEMUCS_OVERLAP", "0.1"))
 # Dynamically adjust active jobs based on GPU availability
 try:
@@ -745,6 +745,8 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
     msg = "نعزل الصوت البشري عن مسار المعازف بالذكاء الاصطناعي. لن يستغرق الأمر سوى لحظات يسيرة."
         
     update_job(job_id, status="separating", stage="عزل الصوت", progress=42, message=msg)
+    # More shifts = better quality but slower. Use 5 for htdemucs_ft, 2 for others.
+    shifts = 5 if model == "htdemucs_ft" else 2
     command = [
         sys.executable,
         "-m",
@@ -756,7 +758,7 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
         "-j",
         str(max(1, DEMUCS_JOBS)),
         "--shifts",
-        "2",
+        str(shifts),
         "--overlap",
         "0.5",
     ]
@@ -771,7 +773,7 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
         command.extend(["--segment", str(int(DEMUCS_SEGMENT))])
     run_cmd(command, "فشل محرك عزل الصوت.", job_id=job_id)
 
-    vocals, instrumental = find_demucs_stems(out_dir, audio.stem)
+    vocals, instrumental = find_demucs_stems(out_dir, audio.stem, model)
     if not vocals.exists() or not instrumental.exists():
         raise RuntimeError("انتهى محرك العزل لكن ملفات الصوت المتوقعة غير موجودة.")
 
@@ -779,8 +781,8 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
     return vocals, instrumental
 
 
-def find_demucs_stems(out_dir: Path, stem_name: str) -> tuple[Path, Path]:
-    expected_root = out_dir / DEMUCS_MODEL / stem_name
+def find_demucs_stems(out_dir: Path, stem_name: str, model_name: str = None) -> tuple[Path, Path]:
+    expected_root = out_dir / (model_name or DEMUCS_MODEL) / stem_name
     vocals = expected_root / "vocals.wav"
     instrumental = expected_root / "no_vocals.wav"
     if vocals.exists() and instrumental.exists():
@@ -807,8 +809,9 @@ def encode_audio(job_id: str, source_audio: Path, filename: str, progress: int, 
         "-vn",
     ]
     if filter_vocals:
-        # Reverted to original highly-optimized purification filters that balance vocal naturalness and music gating
-        cmd.extend(["-af", "highpass=f=120,lowpass=f=8000,agate=threshold=0.02:range=0.02:attack=20:release=200,dynaudnorm=g=5:p=0.71:m=10"])
+        # Aggressive music gate: threshold=0.03 catches quiet bleed, range=0.0001 = full mute below threshold
+        # attack=10ms fast open for speech, release=250ms gentle fade to avoid clicks
+        cmd.extend(["-af", "highpass=f=100,lowpass=f=8500,agate=threshold=0.03:range=0.0001:attack=10:release=250,dynaudnorm=g=5:p=0.71:m=10"])
         
     cmd.extend([
         "-c:a",
