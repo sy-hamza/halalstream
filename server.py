@@ -810,9 +810,9 @@ def encode_audio(job_id: str, source_audio: Path, filename: str, progress: int, 
         "-vn",
     ]
     if filter_vocals:
-        # Aggressive music gate: threshold=0.03 catches quiet bleed, range=0.0001 = full mute below threshold
-        # attack=10ms fast open for speech, release=250ms gentle fade to avoid clicks
-        cmd.extend(["-af", "highpass=f=100,lowpass=f=8500,agate=threshold=0.03:range=0.0001:attack=10:release=250,dynaudnorm=g=5:p=0.71:m=10"])
+        # CRITICAL: Do NOT put dynaudnorm after agate - it boosts silenced sections back up!
+        # Chain: bandpass to vocal range → gate silences non-vocal sections → gentle normalize at end
+        cmd.extend(["-af", "highpass=f=100,lowpass=f=8500,agate=threshold=0.02:range=0.0001:attack=10:release=250"])
         
     cmd.extend([
         "-c:a",
