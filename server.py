@@ -74,6 +74,8 @@ RESIDUAL_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_RESIDUAL_MUSIC_RAT
 RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD = float(os.getenv("HALALSTREAM_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD", "0.01"))
 VOICELESS_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_VOICELESS_MUSIC_RATIO_THRESHOLD", "0.92"))
 STRICT_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_STRICT_MUSIC_RATIO_THRESHOLD", "0.45"))
+STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD", "0.06"))
+STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD = float(os.getenv("HALALSTREAM_STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD", "0.004"))
 MODAL_PURIFY_URL = os.getenv("HALALSTREAM_MODAL_PURIFY_URL", "").strip()
 MODAL_PURIFY_SECRET = os.getenv("HALALSTREAM_MODAL_SECRET", "").strip()
 MODAL_PURIFY_TIMEOUT = max(300, int(os.getenv("HALALSTREAM_MODAL_PURIFY_TIMEOUT", "1800")))
@@ -190,6 +192,8 @@ def health() -> Dict[str, Any]:
         "residual_music_ratio_threshold": RESIDUAL_MUSIC_RATIO_THRESHOLD,
         "voiceless_music_ratio_threshold": VOICELESS_MUSIC_RATIO_THRESHOLD,
         "strict_music_ratio_threshold": STRICT_MUSIC_RATIO_THRESHOLD,
+        "strict_residual_music_ratio_threshold": STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD,
+        "strict_residual_music_absolute_threshold": STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD,
         "modal_purify_enabled": bool(MODAL_PURIFY_URL and MODAL_PURIFY_SECRET and requests is not None),
         "modal_purify_url_configured": bool(MODAL_PURIFY_URL),
         "max_active_processing_jobs": MAX_ACTIVE_PROCESSING_JOBS,
@@ -1090,6 +1094,18 @@ def silence_result_for_voiceless_music(job_id: str, reference_audio: Path) -> Di
     }
 
 
+def silence_result_for_persistent_music(job_id: str, reference_audio: Path, best: Dict[str, Any]) -> Dict[str, Any]:
+    out = write_silence_like(reference_audio, job_dir(job_id) / "vocals_silenced_persistent_music.wav")
+    return {
+        "path": out,
+        "mode": "silence_persistent_music",
+        "ratio": float(best.get("ratio") or 0.0),
+        "absolute": float(best.get("absolute") or 0.0),
+        "safe": True,
+        "silenced": True,
+    }
+
+
 def write_silence_like(reference_audio: Path, out: Path) -> Path:
     try:
         import numpy as np
@@ -1146,6 +1162,17 @@ def purify_with_retries(job_id: str, vocals_path: Path, instrumental_path: Path,
                 message="بقي أثر موسيقي بعد المحاولة الحالية. نعيد التنقية بنمط أقوى.",
             )
     assert best is not None
+    if strict_source and (
+        best["ratio"] >= STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD
+        or best["absolute"] >= STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD
+    ):
+        update_job(
+            job_id,
+            residual_music_ratio=round(best["ratio"], 4),
+            purification_mode="silence_persistent_music",
+            message="بقي أثر موسيقي واضح بعد أقوى تنقية. نخرج مساراً صامتاً احتياطاً بدل تمرير المعازف.",
+        )
+        return silence_result_for_persistent_music(job_id, vocals_path, best)
     update_job(
         job_id,
         residual_music_ratio=round(best["ratio"], 4),
@@ -1160,6 +1187,8 @@ def completion_message(purification_result: Optional[Dict[str, Any]]) -> str:
         return "تم بحمد الله عزل مسار المعازف وإعداد نسخة منقّاة قدر الإمكان. الملف جاهز للتحميل."
     if purification_result.get("voiceless"):
         return "لم نجد صوتاً بشرياً موثوقاً بعد عزل المعازف، لذلك أخرجنا مساراً صامتاً بدل تمرير الموسيقى."
+    if purification_result.get("silenced"):
+        return "بقي أثر موسيقي واضح بعد أقوى تنقية، لذلك أخرجنا مساراً صامتاً احتياطاً بدل تمرير المعازف."
     if purification_result.get("safe"):
         return "تم بحمد الله عزل مسار المعازف وإعداد نسخة منقّاة قدر الإمكان. الملف جاهز للتحميل."
     return "اكتملت أقوى محاولة تنقية متاحة. قد يتأثر الصوت البشري، لكننا أعدنا المحاولة لتقليل بقايا المعازف قدر الإمكان."

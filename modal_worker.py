@@ -25,6 +25,8 @@ RESIDUAL_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_RESIDUAL_MUSIC_RAT
 RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD = float(os.getenv("HALALSTREAM_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD", "0.01"))
 VOICELESS_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_VOICELESS_MUSIC_RATIO_THRESHOLD", "0.92"))
 STRICT_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_STRICT_MUSIC_RATIO_THRESHOLD", "0.45"))
+STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD", "0.06"))
+STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD = float(os.getenv("HALALSTREAM_STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD", "0.004"))
 
 image = (
     modal.Image.from_registry(
@@ -242,6 +244,18 @@ def silence_result_for_voiceless_music(workdir: Path, reference_audio: Path) -> 
     }
 
 
+def silence_result_for_persistent_music(workdir: Path, reference_audio: Path, best: Dict[str, Any]) -> Dict[str, Any]:
+    out = write_silence_like(reference_audio, workdir / "vocals_silenced_persistent_music.wav")
+    return {
+        "path": out,
+        "mode": "silence_persistent_music",
+        "ratio": float(best.get("ratio") or 0.0),
+        "absolute": float(best.get("absolute") or 0.0),
+        "safe": True,
+        "silenced": True,
+    }
+
+
 def write_silence_like(reference_audio: Path, out: Path) -> Path:
     import numpy as np
     import soundfile as sf
@@ -281,12 +295,19 @@ def purify_with_retries(workdir: Path, vocals_path: Path, instrumental_path: Pat
         if result["safe"] and not strict_source:
             return result
     assert best is not None
+    if strict_source and (
+        best["ratio"] >= STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD
+        or best["absolute"] >= STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD
+    ):
+        return silence_result_for_persistent_music(workdir, vocals_path, best)
     return best
 
 
 def completion_message(result: Dict[str, Any]) -> str:
     if result.get("voiceless"):
         return "لم نجد صوتاً بشرياً موثوقاً بعد عزل المعازف، لذلك أخرجنا مساراً صامتاً بدل تمرير الموسيقى."
+    if result.get("silenced"):
+        return "بقي أثر موسيقي واضح بعد أقوى تنقية، لذلك أخرجنا مساراً صامتاً احتياطاً بدل تمرير المعازف."
     if result.get("safe"):
         return "تم بحمد الله إعداد نسخة منقّاة عبر عامل Modal. الملف جاهز للتحميل."
     return "اكتملت أقوى محاولة تنقية متاحة عبر Modal. قد يتأثر الصوت البشري، لكننا أعدنا المحاولة لتقليل بقايا المعازف قدر الإمكان."
