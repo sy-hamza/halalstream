@@ -180,17 +180,25 @@ class LinkJobRequest(BaseModel):
 
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(ROOT / "index.html")
+    return FileResponse(ROOT / "index.html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/app.js")
 def app_js() -> FileResponse:
-    return FileResponse(ROOT / "app.js", media_type="application/javascript")
+    return FileResponse(
+        ROOT / "app.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/styles.css")
 def styles() -> FileResponse:
-    return FileResponse(ROOT / "styles.css", media_type="text/css")
+    return FileResponse(
+        ROOT / "styles.css",
+        media_type="text/css",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/health")
