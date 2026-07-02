@@ -57,6 +57,8 @@ let recordedChunks = [];
 let recordingStream = null;
 let currentJobId = null;
 let pollTimer = null;
+let pollFailures = 0;
+let pollInFlight = false;
 let elapsedTimer = null;
 let jobStartedAt = null;
 let lastLogMessage = "";
@@ -86,6 +88,7 @@ const statusToStep = {
   complete: "delivery",
   failed: "decision"
 };
+const terminalStatuses = new Set(["clean", "direct", "needs_consent", "complete", "failed"]);
 
 tabs.forEach((tab) => {
   tab.addEventListener("click", () => setMode(tab.dataset.mode));
@@ -363,6 +366,11 @@ async function restoreLatestJob() {
     currentJobId = job.id;
     renderJob(job);
     appendLog("استعدنا آخر مهمة محفوظة لجهازك.");
+    if (!terminalStatuses.has(job.status)) {
+      setBusy(true);
+      startElapsedTimer(job.created_at ? Number(job.created_at) * 1000 : undefined);
+      startPolling(job.id);
+    }
   } catch (error) {
     // لا نزعج المستخدم إذا لم تكن هناك مهمة سابقة.
   }
@@ -427,29 +435,55 @@ async function createJob() {
 
 function startPolling(jobId) {
   window.clearInterval(pollTimer);
+  pollFailures = 0;
+  pollInFlight = false;
   pollTimer = window.setInterval(() => pollJob(jobId), 1300);
   pollJob(jobId);
 }
 
 async function pollJob(jobId) {
+  if (pollInFlight) {
+    return;
+  }
+  pollInFlight = true;
   try {
     const response = await fetch(`${API_BASE}/api/jobs/${jobId}`, { cache: "no-store" });
     if (!response.ok) {
-      throw new Error(await readError(response));
+      const message = await readError(response);
+      const error = new Error(message);
+      error.status = response.status;
+      throw error;
     }
     const job = await response.json();
+    pollFailures = 0;
+    clearError();
     renderJob(job);
-    if (["clean", "direct", "needs_consent", "complete", "failed"].includes(job.status)) {
+    if (terminalStatuses.has(job.status)) {
       window.clearInterval(pollTimer);
       pollTimer = null;
       setBusy(false);
       stopElapsedTimer();
     }
   } catch (error) {
-    window.clearInterval(pollTimer);
-    pollTimer = null;
-    setBusy(false);
-    showError(error.message || "تعذر قراءة حالة المهمة.");
+    pollFailures += 1;
+    const permanentMissing = error.status === 404 && pollFailures >= 3;
+    if (permanentMissing) {
+      window.clearInterval(pollTimer);
+      pollTimer = null;
+      setBusy(false);
+      stopElapsedTimer();
+      showError(error.message || "تعذر العثور على المهمة.");
+      return;
+    }
+    if (pollFailures === 1 || pollFailures % 8 === 0) {
+      appendLog("انقطع تحديث الحالة لحظياً، نعيد المحاولة تلقائياً دون إيقاف المعالجة.");
+    }
+    if (pollFailures >= 8) {
+      showError("الاتصال بحالة المهمة متقطع، لكن المعالجة مستمرة. سنواصل التحديث تلقائياً.");
+      checkHealth();
+    }
+  } finally {
+    pollInFlight = false;
   }
 }
 
@@ -756,10 +790,10 @@ function toPowerShellSingleQuoted(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
 
-function startElapsedTimer() {
+function startElapsedTimer(startedAtMs = Date.now()) {
   stopElapsedTimer();
-  jobStartedAt = Date.now();
-  metricTime.textContent = "00:00";
+  jobStartedAt = Number.isFinite(startedAtMs) ? startedAtMs : Date.now();
+  metricTime.textContent = formatTime(Math.floor((Date.now() - jobStartedAt) / 1000));
   elapsedTimer = window.setInterval(() => {
     const seconds = Math.floor((Date.now() - jobStartedAt) / 1000);
     metricTime.textContent = formatTime(seconds);
