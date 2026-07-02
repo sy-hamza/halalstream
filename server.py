@@ -87,6 +87,25 @@ UVR_RESCUE_MODELS = tuple(
     if model.strip()
 )
 UVR_MODEL_DIR = os.getenv("HALALSTREAM_UVR_MODEL_DIR", str(STORAGE / "audio-separator-models"))
+VOICE_ENHANCE_ENABLED = os.getenv("HALALSTREAM_VOICE_ENHANCE_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+VOICE_ENHANCE_FILTER = os.getenv(
+    "HALALSTREAM_VOICE_ENHANCE_FILTER",
+    "highpass=f=85,lowpass=f=8800,afftdn=nf=-28,"
+    "equalizer=f=1800:t=q:w=1.0:g=2.2,"
+    "equalizer=f=3200:t=q:w=1.1:g=2.4,"
+    "acompressor=threshold=0.055:ratio=2.6:attack=8:release=180:makeup=5:knee=2.5,"
+    "dynaudnorm=f=120:g=7:p=0.55:m=8,"
+    "alimiter=limit=0.92",
+).strip()
+VOICE_ENHANCE_SPEECH_FILTER = os.getenv(
+    "HALALSTREAM_VOICE_ENHANCE_SPEECH_FILTER",
+    "highpass=f=120,lowpass=f=5200,afftdn=nf=-24,"
+    "equalizer=f=1500:t=q:w=1.1:g=2.8,"
+    "equalizer=f=3000:t=q:w=1.0:g=3.0,"
+    "acompressor=threshold=0.045:ratio=3.2:attack=6:release=160:makeup=6:knee=2.5,"
+    "dynaudnorm=f=120:g=7:p=0.58:m=10,"
+    "alimiter=limit=0.90",
+).strip()
 MODAL_PURIFY_URL = os.getenv("HALALSTREAM_MODAL_PURIFY_URL", "").strip()
 MODAL_PURIFY_SECRET = os.getenv("HALALSTREAM_MODAL_SECRET", "").strip()
 MODAL_PURIFY_TIMEOUT = max(300, int(os.getenv("HALALSTREAM_MODAL_PURIFY_TIMEOUT", "1800")))
@@ -205,6 +224,7 @@ def health() -> Dict[str, Any]:
         "strict_music_ratio_threshold": STRICT_MUSIC_RATIO_THRESHOLD,
         "strict_residual_music_ratio_threshold": STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD,
         "strict_residual_music_absolute_threshold": STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD,
+        "voice_enhance_enabled": VOICE_ENHANCE_ENABLED,
         "modal_purify_enabled": bool(MODAL_PURIFY_URL and MODAL_PURIFY_SECRET and requests is not None),
         "modal_purify_url_configured": bool(MODAL_PURIFY_URL),
         "max_active_processing_jobs": MAX_ACTIVE_PROCESSING_JOBS,
@@ -739,7 +759,7 @@ def purify_job(job_id: str) -> None:
             purified_vocals,
             "purified-audio.m4a",
             86,
-            "نجهز نسخة صوتية منقّاة وسريعة التحميل.",
+            "نحسّن وضوح الصوت المنقّى ونجهز نسخة التحميل.",
             filter_vocals=True,
             speech_only=bool(purification_result and purification_result.get("speech_rescue")),
         )
@@ -1743,12 +1763,9 @@ def encode_audio(
         str(source_audio),
         "-vn",
     ]
-    if speech_only:
-        cmd.extend(["-af", "highpass=f=120,lowpass=f=4200,afftdn=nf=-25"])
-    elif filter_vocals:
-        # Keep only a gentle speech band-limit here. Hard gates caused audible
-        # word dropouts and can bring musical artifacts forward after encoding.
-        cmd.extend(["-af", "highpass=f=70,lowpass=f=9500"])
+    audio_filter = output_audio_filter(filter_vocals, speech_only)
+    if audio_filter:
+        cmd.extend(["-af", audio_filter])
         
     cmd.extend([
         "-c:a",
@@ -1768,6 +1785,16 @@ def encode_audio(
     if not out.exists() or out.stat().st_size == 0:
         raise RuntimeError("فشل تجهيز ملف الصوت: لم ينتج ffmpeg ملفاً صالحاً.")
     return out
+
+
+def output_audio_filter(filter_vocals: bool, speech_only: bool) -> str:
+    if not filter_vocals:
+        return ""
+    if VOICE_ENHANCE_ENABLED:
+        return VOICE_ENHANCE_SPEECH_FILTER if speech_only else VOICE_ENHANCE_FILTER
+    if speech_only:
+        return "highpass=f=120,lowpass=f=4200,afftdn=nf=-25"
+    return "highpass=f=70,lowpass=f=9500"
 
 
 def estimate_music_ratio(audio: Path, vocals: Path, instrumental: Path) -> tuple[float, float]:

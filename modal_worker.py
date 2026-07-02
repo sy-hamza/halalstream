@@ -38,6 +38,25 @@ UVR_RESCUE_MODELS = tuple(
     if model.strip()
 )
 UVR_MODEL_DIR = os.getenv("HALALSTREAM_UVR_MODEL_DIR", "/root/.cache/audio-separator-models")
+VOICE_ENHANCE_ENABLED = os.getenv("HALALSTREAM_VOICE_ENHANCE_ENABLED", "1") != "0"
+VOICE_ENHANCE_FILTER = os.getenv(
+    "HALALSTREAM_VOICE_ENHANCE_FILTER",
+    "highpass=f=85,lowpass=f=8800,afftdn=nf=-28,"
+    "equalizer=f=1800:t=q:w=1.0:g=2.2,"
+    "equalizer=f=3200:t=q:w=1.1:g=2.4,"
+    "acompressor=threshold=0.055:ratio=2.6:attack=8:release=180:makeup=5:knee=2.5,"
+    "dynaudnorm=f=120:g=7:p=0.55:m=8,"
+    "alimiter=limit=0.92",
+).strip()
+VOICE_ENHANCE_SPEECH_FILTER = os.getenv(
+    "HALALSTREAM_VOICE_ENHANCE_SPEECH_FILTER",
+    "highpass=f=120,lowpass=f=5200,afftdn=nf=-24,"
+    "equalizer=f=1500:t=q:w=1.1:g=2.8,"
+    "equalizer=f=3000:t=q:w=1.0:g=3.0,"
+    "acompressor=threshold=0.045:ratio=3.2:attack=6:release=160:makeup=6:knee=2.5,"
+    "dynaudnorm=f=120:g=7:p=0.58:m=10,"
+    "alimiter=limit=0.90",
+).strip()
 
 image = (
     modal.Image.from_registry(
@@ -211,13 +230,22 @@ def separate_vocals(workdir: Path, audio: Path) -> tuple[Path, Path]:
 def encode_audio(workdir: Path, source_audio: Path, filename: str, filter_vocals: bool, speech_only: bool = False) -> Path:
     out = workdir / filename
     cmd = ["ffmpeg", "-y", "-i", str(source_audio), "-vn"]
-    if speech_only:
-        cmd.extend(["-af", "highpass=f=120,lowpass=f=4200,afftdn=nf=-25"])
-    elif filter_vocals:
-        cmd.extend(["-af", "highpass=f=70,lowpass=f=9500"])
+    audio_filter = output_audio_filter(filter_vocals, speech_only)
+    if audio_filter:
+        cmd.extend(["-af", audio_filter])
     cmd.extend(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out)])
     run_cmd(cmd, "Failed to encode audio.")
     return out
+
+
+def output_audio_filter(filter_vocals: bool, speech_only: bool) -> str:
+    if not filter_vocals:
+        return ""
+    if VOICE_ENHANCE_ENABLED:
+        return VOICE_ENHANCE_SPEECH_FILTER if speech_only else VOICE_ENHANCE_FILTER
+    if speech_only:
+        return "highpass=f=120,lowpass=f=4200,afftdn=nf=-25"
+    return "highpass=f=70,lowpass=f=9500"
 
 
 def estimate_music_ratio(audio: Path, vocals: Path, instrumental: Path) -> tuple[float, float]:
