@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, HttpUrl
@@ -66,6 +66,11 @@ AUTO_PURIFY_ON_DETECTION = os.getenv("HALALSTREAM_AUTO_PURIFY_ON_DETECTION", "1"
 ESTIMATED_PROCESSING_SECONDS = max(60, int(os.getenv("HALALSTREAM_ESTIMATED_PROCESSING_SECONDS", "240")))
 JOB_TTL_HOURS = max(1.0, float(os.getenv("HALALSTREAM_JOB_TTL_HOURS", "12")))
 CLEANUP_INTERVAL_SECONDS = max(300, int(os.getenv("HALALSTREAM_CLEANUP_INTERVAL_SECONDS", "1800")))
+MAX_UPLOAD_BYTES = max(1 * 1024 * 1024, int(os.getenv("HALALSTREAM_MAX_UPLOAD_BYTES", str(350 * 1024 * 1024))))
+MAX_REMOTE_DOWNLOAD_BYTES = max(
+    1 * 1024 * 1024,
+    int(os.getenv("HALALSTREAM_MAX_REMOTE_DOWNLOAD_BYTES", str(500 * 1024 * 1024))),
+)
 COBALT_PARALLELISM = max(1, int(os.getenv("HALALSTREAM_COBALT_PARALLELISM", "5")))
 COBALT_API_TIMEOUT = max(3, int(os.getenv("HALALSTREAM_COBALT_API_TIMEOUT", "8")))
 COBALT_DOWNLOAD_TIMEOUT = max(10, int(os.getenv("HALALSTREAM_COBALT_DOWNLOAD_TIMEOUT", "25")))
@@ -162,11 +167,20 @@ from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), geolocation=(), microphone=(self)")
+    return response
 
 jobs: Dict[str, Dict[str, Any]] = {}
 jobs_lock = threading.Lock()
@@ -229,6 +243,8 @@ def health() -> Dict[str, Any]:
         "waiting_processing_jobs": waiting_count,
         "estimated_processing_seconds": ESTIMATED_PROCESSING_SECONDS,
         "job_ttl_hours": JOB_TTL_HOURS,
+        "max_upload_mb": round(MAX_UPLOAD_BYTES / (1024 * 1024), 1),
+        "max_remote_download_mb": round(MAX_REMOTE_DOWNLOAD_BYTES / (1024 * 1024), 1),
         "cobalt_parallelism": COBALT_PARALLELISM,
         "verify_purified_output": VERIFY_PURIFIED_OUTPUT,
         "residual_music_ratio_threshold": RESIDUAL_MUSIC_RATIO_THRESHOLD,
@@ -288,12 +304,32 @@ async def create_upload_job(
     suffix = safe_suffix(file.filename)
     original_path = workdir / f"uploaded{suffix}"
 
+    written = 0
+    exceeded_limit = False
     with original_path.open("wb") as target:
         while True:
             chunk = await file.read(1024 * 1024)
             if not chunk:
                 break
+            written += len(chunk)
+            if written > MAX_UPLOAD_BYTES:
+                exceeded_limit = True
+                break
             target.write(chunk)
+
+    if exceeded_limit:
+        original_path.unlink(missing_ok=True)
+        update_job(
+            job["id"],
+            status="failed",
+            stage="حجم الملف كبير",
+            progress=0,
+            message=f"حجم الملف أكبر من الحد المسموح حالياً ({MAX_UPLOAD_BYTES // (1024 * 1024)} MB).",
+        )
+        raise HTTPException(
+            status_code=413,
+            detail=f"حجم الملف أكبر من الحد المسموح حالياً ({MAX_UPLOAD_BYTES // (1024 * 1024)} MB).",
+        )
 
     update_job(job["id"], original_path=str(original_path), title=file.filename)
     start_worker(process_job, job["id"])
@@ -328,7 +364,7 @@ def purify(job_id: str) -> Dict[str, str]:
     if job["status"] not in {"needs_consent", "failed_after_detection"}:
         raise HTTPException(status_code=409, detail="لا يمكن بدء إزالة المعازف في الحالة الحالية.")
 
-    update_job(job_id, status="purifying", stage="إزالة المعازف", progress=82, message="تمت الموافقة. نجهز نسخة منقّاة الآن.")
+    update_job(job_id, status="purifying", stage="إزالة المعازف", progress=82, message="نبدأ إزالة المعازف ونجهز نسخة منقّاة الآن.")
     start_worker(purify_job, job_id)
     return {"id": job_id}
 
@@ -488,7 +524,7 @@ def process_job(job_id: str) -> None:
                 message=(
                     "تم رصد مسار معازف. نبدأ إزالة المعازف تلقائياً ولا نطلق الملف الأصلي."
                     if AUTO_PURIFY_ON_DETECTION
-                    else "تم رصد مسار معازف. أوقفنا التحميل حتى توافق على إزالته."
+                    else "تم رصد مسار معازف. أوقفنا التحميل حتى تختار إزالة المعازف."
                 ),
                 has_music=True,
                 instrumental_ratio=round(ratio, 4),
@@ -865,11 +901,26 @@ def try_cobalt_download(job_id: str, url: str, workdir: Path, api_url: str, inde
     out_path = workdir / f"downloaded-{index}{suffix}"
     dl_req = urllib.request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(dl_req, context=context, timeout=COBALT_DOWNLOAD_TIMEOUT) as dl_res:
+        try:
+            content_length = int(dl_res.headers.get("Content-Length") or "0")
+        except ValueError:
+            content_length = 0
+        if content_length > MAX_REMOTE_DOWNLOAD_BYTES:
+            raise RuntimeError(
+                f"حجم الملف من الرابط أكبر من الحد المسموح ({MAX_REMOTE_DOWNLOAD_BYTES // (1024 * 1024)} MB)."
+            )
+        downloaded = 0
         with partial_path.open("wb") as f:
             while True:
                 chunk = dl_res.read(1024 * 1024)
                 if not chunk:
                     break
+                downloaded += len(chunk)
+                if downloaded > MAX_REMOTE_DOWNLOAD_BYTES:
+                    partial_path.unlink(missing_ok=True)
+                    raise RuntimeError(
+                        f"حجم الملف من الرابط أكبر من الحد المسموح ({MAX_REMOTE_DOWNLOAD_BYTES // (1024 * 1024)} MB)."
+                    )
                 f.write(chunk)
     if partial_path.exists() and partial_path.stat().st_size > 0:
         partial_path.replace(out_path)
@@ -964,6 +1015,7 @@ def build_ydl_options(workdir: Path, job_id: str, youtube_clients: tuple[str, ..
         "source_address": "0.0.0.0",
         "ffmpeg_location": str(Path(require_ffmpeg()).parent),
         "remote_components": list(YOUTUBE_REMOTE_COMPONENTS),
+        "max_filesize": MAX_REMOTE_DOWNLOAD_BYTES,
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1075,7 +1127,7 @@ def separate_vocals(job_id: str, audio: Path, quality: str = "high") -> tuple[Pa
     if quality == "fast":
         model = "hdemucs_mmi"
         
-    msg = "نعزل الصوت البشري عن مسار المعازف بالذكاء الاصطناعي. لن يستغرق الأمر سوى لحظات يسيرة."
+    msg = "نعزل الصوت البشري عن مسار المعازف بالذكاء الاصطناعي. المقاطع الصعبة قد تحتاج عدة دقائق للحفاظ على الجودة."
         
     update_job(job_id, status="separating", stage="عزل الصوت", progress=42, message=msg)
     shifts = 1 if quality == "fast" else DEMUCS_SHIFTS

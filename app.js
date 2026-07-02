@@ -70,7 +70,7 @@ const waitingNotes = [
   "يمكنك ترك الصفحة مفتوحة والرجوع لاحقاً؛ خادم المعالجة سيكمل العمل ما دام السيرفر شغالاً.",
   "استغل وقت الانتظار بالاستغفار: أستغفر الله وأتوب إليه.",
   "قال تعالى: {وَمَنْ يَتَّقِ اللَّهَ يَجْعَلْ لَهُ مَخْرَجًا}.",
-  "يُمسخُ قومٌ من أمتي في آخرِ الزمانِ قِرَدةً وخنازيرَ، قيل : يا رسولَ اللهِ ويشهدونَ أنْ لا إلهَ إلا اللهُ وأنك رسولُ اللهِ ويصومون ؟ قال : نعم. قيل : فما بالُهم يا رسولَ اللهِ ؟ قال : يتخذونَ المعازفَ والقيناتِ والدفوفَ ويشربونَ الأشربةَ فباتوا على شُربِهم ولهوِهم، فأصبحوا وقد مُسِخوا قِرَدةً وخنازيرَ",
+  "قال النبي صلى الله عليه وسلم: «ليكونن من أمتي أقوام يستحلون ... والمعازف» صحيح البخاري 5590.",
   "نحاول إبقاء الصوت البشري وحذف مسار المعازف قدر الإمكان.",
   "دع قلبك يستريح بذكر الله حتى يكتمل العمل."
 ];
@@ -162,8 +162,8 @@ async function startPurify() {
     clearError();
     setBusy(true);
     hideResultCards();
-    updateStatus("بدء إزالة المعازف", "تمت الموافقة. نبدأ تجهيز نسخة منقّاة بالصوت البشري قدر الإمكان.", 82);
-    appendLog("تمت الموافقة على إزالة المعازف. يمكنك الاستغفار حتى يكتمل العمل.");
+    updateStatus("بدء إزالة المعازف", "نبدأ تجهيز نسخة منقّاة بالصوت البشري قدر الإمكان.", 82);
+    appendLog("بدأت إزالة المعازف. يمكنك الاستغفار حتى يكتمل العمل.");
     const response = await fetch(`${API_BASE}/api/jobs/${currentJobId}/purify`, { method: "POST" });
     if (!response.ok) {
       throw new Error(await readError(response));
@@ -304,7 +304,7 @@ async function checkHealth() {
       updateStatus(
         "خادم المعالجة جاهز",
         linkDownloadsReliable
-          ? "أرسل رابطاً أو ملفاً، وسنوقف التحميل إن ظهرت معازف حتى تختار إزالتها."
+          ? "أرسل رابطاً أو ملفاً. عند اختيار التنقية سيعمل العزل تلقائياً، وعند اختيار التحميل المباشر لن يتم الفحص."
           : "ارفع ملفاً من جهازك للحصول على نتيجة أثبت.",
         0
       );
@@ -339,11 +339,11 @@ async function checkHealth() {
       document.body.appendChild(wakeFrame);
     }
 
-    const wakeUpUrl = "https://7haydar-halalstream.hf.space";
     updateStatus(
-      "جاري تشغيل خادم الذكاء الاصطناعي تلقائياً... ⚡",
-      `كان السيرفر في وضع الاستعداد لتوفير الطاقة والتكلفة. نقوم الآن بإيقاظه تلقائياً في الخلفية، يرجى الانتظار حوالي 20-30 ثانية وسيصبح جاهزاً للعمل تلقائياً دون أي تدخل منك. <br><a href="${wakeUpUrl}" target="_blank" style="color: #b68134; font-size: 0.76rem; text-decoration: underline; display: inline-block; margin-top: 8px;">إذا طال الانتظار لأكثر من دقيقة اضغط هنا للتنشيط يدوياً.</a>`,
-      25
+      "جاري تشغيل خادم الذكاء الاصطناعي تلقائياً",
+      "كان السيرفر في وضع الاستعداد لتوفير الطاقة والتكلفة. نقوم الآن بإيقاظه تلقائياً في الخلفية، يرجى الانتظار حوالي 20-30 ثانية.",
+      25,
+      { wakeUrl: "https://7haydar-halalstream.hf.space" }
     );
 
     if (!healthPollTimer) {
@@ -532,7 +532,7 @@ function renderJob(job) {
     const ratioPct = Math.round((job.instrumental_ratio || 0) * 100);
     const completeRatioEl = document.querySelector("#complete-ratio");
     if (completeRatioEl) {
-      completeRatioEl.textContent = `نسبة المعازف قبل التنقية: ${ratioPct}% | طُبّقت تنقية صارمة على مسار الكلام`;
+      completeRatioEl.textContent = `نسبة المعازف قبل التنقية: ${ratioPct}% | طُبّقت تنقية صارمة مع ترميم طبيعي للصوت`;
       completeRatioEl.hidden = false;
     }
     completeCard.hidden = false;
@@ -567,10 +567,19 @@ function setMode(mode) {
   });
 }
 
-function updateStatus(title, message, progress) {
+function updateStatus(title, message, progress, options = {}) {
   const safeProgress = Math.max(0, Math.min(100, Number(progress) || 0));
   statusTitle.textContent = title;
-  statusMessage.innerHTML = message;
+  statusMessage.textContent = message;
+  if (options.wakeUrl) {
+    const wakeLink = document.createElement("a");
+    wakeLink.href = options.wakeUrl;
+    wakeLink.target = "_blank";
+    wakeLink.rel = "noopener";
+    wakeLink.className = "status-link";
+    wakeLink.textContent = "إذا طال الانتظار لأكثر من دقيقة اضغط هنا للتنشيط يدوياً.";
+    statusMessage.append(document.createElement("br"), wakeLink);
+  }
   progressBar.style.width = `${safeProgress}%`;
   metricProgress.textContent = `${safeProgress}%`;
 }
@@ -688,10 +697,10 @@ function humanMessage(job) {
     return "نستخرج الصوت من المقطع حتى نبدأ فحص مسار المعازف.";
   }
   if (job.status === "separating" || job.status === "analyzing") {
-    return `${pickWaitingNote()} جاري المعالجة بالذكاء الاصطناعي، لن يستغرق الأمر سوى لحظات يسيرة.`;
+    return `${pickWaitingNote()} جاري المعالجة بالذكاء الاصطناعي. المقاطع الصعبة قد تستغرق عدة دقائق حتى نحافظ على جودة العزل.`;
   }
   if (job.status === "needs_consent") {
-    return "⚠️ تم رصد مسار معازف! أوقفنا التحميل. يرجى النزول لأسفل لوحة المعالجة والموافقة لإكمال عملية التطهير.";
+    return "تم رصد مسار معازف. اختر إزالة المعازف لإكمال نسخة منقّاة، أو ارفع ملفاً آخر.";
   }
   if (job.status === "purifying") {
     return `${pickWaitingNote()} رصدنا معازف ونجهز النسخة المنقّاة تلقائياً.`;
@@ -717,7 +726,7 @@ function humanLog(job) {
   if (job.status === "extracting") return "استخراج الصوت: نجهز المسار الصوتي للفحص.";
   if (job.status === "separating") return `عزل الصوت: ${pickWaitingNote()}`;
   if (job.status === "analyzing") return "مراجعة النتيجة: نتحقق قبل السماح بالتحميل.";
-  if (job.status === "needs_consent") return "قرار الفحص: رُصدت معازف، والتحميل متوقف حتى توافق على الإزالة.";
+  if (job.status === "needs_consent") return "مراجعة الفحص: رُصدت معازف، والتحميل متوقف حتى تختار إزالة المعازف.";
   if (job.status === "purifying") return "إزالة المعازف: رصدنا معازف ونجهز النسخة المنقّاة تلقائياً.";
   if (job.status === "complete") return "تمت إزالة المعازف: الملف المنقّى جاهز للتحميل.";
   if (job.status === "clean") return "الحمد لله: المقطع سليم وجاهز للتحميل.";

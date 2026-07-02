@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700;800&display=swap"
     rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles.css?v=safety-ui-v1" />
 </head>
 
 <body>
@@ -36,12 +36,11 @@
     <p class="notice-kicker">تنبيه قبل التحميل</p>
     <h2 id="decision-title">تم رصد معازف في هذا المقطع</h2>
     <p id="decision-copy">
-      أوقفنا التحميل حتى لا يصل إليك الملف وفيه ما يؤذي القلب. اضغط الزر أدناه لنزيل مسار المعازف ونبقي الصوت البشري قدر
-      الإمكان.
+      نوقف تسليم الملف الأصلي عند ظهور أثر للمعازف، ثم نجهز نسخة منقّاة تحافظ على الصوت البشري قدر الإمكان.
     </p>
     <p class="hadith">
       قال رسول الله صلى الله عليه وسلم: «لَيَكُونَنَّ مِنْ أُمَّتِي أَقْوَامٌ يَسْتَحِلُّونَ الْحِرَ، وَالْحَرِيرَ،
-      وَالْخَمْرَ، وَالْمَعَازِفَ» رواه البخاري.
+      وَالْخَمْرَ، وَالْمَعَازِفَ» صحيح البخاري 5590.
     </p>
     <button class="danger-button" id="decision-purify-button" type="button">إزالة المعازف الآن</button>
   </aside>
@@ -66,13 +65,13 @@
         <p class="kicker">إزالة المعازف قبل التحميل</p>
         <h1 id="hero-title">حمّل المقطع بعد أن يطمئن قلبك لخلوه من المعازف</h1>
         <p class="hero-copy">
-          خادم المعالجة يفحص الصوت أولاً. إن ظهر أثر للمعازف يتوقف التحميل حتى تختار إزالة المعازف وإبقاء الصوت البشري
-          قدر الإمكان.
+          اختر التنقية ليبدأ العزل تلقائياً ويحاول حذف مسار المعازف مع إبقاء الصوت البشري واضحاً، أو اختر التحميل
+          المباشر للملفات التي تعرف أنها خالية من المعازف دون فحص.
         </p>
         <div class="hero-badges" aria-label="مزايا المعالجة">
           <span>عزل صوت ذكي</span>
-          <span>تحميل مأمون</span>
-          <span>قرار قبل التنزيل</span>
+          <span>تنقية تلقائية</span>
+          <span>تحميل مباشر اختياري</span>
         </div>
       </section>
 
@@ -120,7 +119,7 @@
 
             <!-- خيارات المعالجة والتحميل -->
             <div class="processing-options-card">
-              <div class="options-title">⚙️ خيارات المعالجة والتحميل</div>
+              <div class="options-title">خيارات المعالجة والتحميل</div>
               <div class="options-group">
 
                 <label class="option-row">
@@ -144,7 +143,7 @@
 
                 <!-- تحذير التحميل المباشر -->
                 <div class="warning-box" id="direct-warning-box" hidden>
-                  ⚠️ <strong>تنبيه الأمان والعهد:</strong> هل أنت متأكد تماماً أن هذا المقطع خالي من أي موسيقى أو معازف؟
+                  <strong>تنبيه الأمان والعهد:</strong> هل أنت متأكد تماماً أن هذا المقطع خال من أي موسيقى أو معازف؟
                   هذا الخيار لا يفحص الملف ولا ينقيه، وسيكون التحميل كما هو.
                 </div>
 
@@ -177,7 +176,7 @@
             <span class="stage-step is-active" data-step="receive">استقبال</span>
             <span class="stage-step" data-step="download">تحميل</span>
             <span class="stage-step" data-step="separate">عزل</span>
-            <span class="stage-step" data-step="decision">قرار</span>
+            <span class="stage-step" data-step="decision">مراجعة</span>
             <span class="stage-step" data-step="delivery">تسليم</span>
           </div>
 
@@ -211,6 +210,17 @@
             </div>
           </div>
 
+          <aside class="hadith-reminder" aria-label="تذكير شرعي">
+            <p class="notice-kicker">تذكير</p>
+            <p>
+              قال النبي صلى الله عليه وسلم:
+              «لَيَكُونَنَّ مِنْ أُمَّتِي أَقْوَامٌ يَسْتَحِلُّونَ ... وَالْمَعَازِفَ».
+            </p>
+            <a class="hadith-source" href="https://sunnah.com/bukhari:5590" target="_blank" rel="noopener">
+              صحيح البخاري 5590
+            </a>
+          </aside>
+
           <div class="process-log" aria-label="سجل المعالجة">
             <div class="log-row is-current">بانتظار تشغيل مهمة جديدة.</div>
           </div>
@@ -237,7 +247,8 @@
             <p id="warning-ratio" style="margin: 12px 0 6px 0; font-weight: bold; color: var(--rose);" hidden></p>
             <p class="hadith">
               قال رسول الله صلى الله عليه وسلم: «لَيَكُونَنَّ مِنْ أُمَّتِي أَقْوَامٌ يَسْتَحِلُّونَ الْحِرَ،
-              وَالْحَرِيرَ، وَالْخَمْرَ، وَالْمَعَازِفَ» رواه البخاري.
+              وَالْحَرِيرَ، وَالْخَمْرَ، وَالْمَعَازِفَ»
+              <a href="https://sunnah.com/bukhari:5590" target="_blank" rel="noopener">صحيح البخاري 5590</a>.
             </p>
             <p>
               أخي الغالي/أختي الكريمة، إن سماع المعازف يمرض القلب، وترك ما حرم الله خطوة مباركة نحو رضاه. دعنا نزيل
@@ -309,7 +320,7 @@
     <span>للتواصل عند حصول مشاكل</span>
   </a>
 
-  <script src="app.js?v=579ab9d" defer></script>
+  <script src="app.js?v=safety-ui-v1" defer></script>
 </body>
 
 </html>

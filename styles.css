@@ -707,6 +707,16 @@ audio {
   line-height: 1.9;
 }
 
+.status-link {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--gold);
+  font-size: 0.78rem;
+  font-weight: 900;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
 .status-metrics {
   width: 100%;
   display: grid;
@@ -787,6 +797,32 @@ audio {
   border-color: rgba(8, 124, 114, 0.18);
   background: rgba(232, 248, 243, 0.8);
   font-weight: 800;
+}
+
+.hadith-reminder {
+  display: grid;
+  gap: 8px;
+  border: 1px solid rgba(182, 129, 52, 0.24);
+  border-radius: 8px;
+  padding: 14px 16px;
+  background: linear-gradient(135deg, rgba(255, 249, 235, 0.86), rgba(232, 248, 243, 0.64));
+}
+
+.hadith-reminder p {
+  margin: 0;
+  color: var(--ink);
+  line-height: 1.85;
+  font-weight: 800;
+}
+
+.hadith-source,
+.notice .hadith a {
+  width: fit-content;
+  color: var(--gold);
+  font-size: 0.8rem;
+  font-weight: 900;
+  text-decoration: underline;
+  text-underline-offset: 4px;
 }
 
 .notice {
@@ -1340,4 +1376,3 @@ audio {
     box-shadow: 0 0 0 8px rgba(255, 152, 0, 0);
   }
 }
-
