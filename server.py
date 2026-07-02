@@ -90,20 +90,24 @@ UVR_MODEL_DIR = os.getenv("HALALSTREAM_UVR_MODEL_DIR", str(STORAGE / "audio-sepa
 VOICE_ENHANCE_ENABLED = os.getenv("HALALSTREAM_VOICE_ENHANCE_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
 VOICE_ENHANCE_FILTER = os.getenv(
     "HALALSTREAM_VOICE_ENHANCE_FILTER",
-    "highpass=f=85,lowpass=f=8800,afftdn=nf=-28,"
-    "equalizer=f=1800:t=q:w=1.0:g=2.2,"
-    "equalizer=f=3200:t=q:w=1.1:g=2.4,"
-    "acompressor=threshold=0.055:ratio=2.6:attack=8:release=180:makeup=5:knee=2.5,"
-    "dynaudnorm=f=120:g=7:p=0.55:m=8,"
+    "highpass=f=75,lowpass=f=11200,afftdn=nf=-26,"
+    "equalizer=f=260:t=q:w=1.0:g=-2.2,"
+    "equalizer=f=2400:t=q:w=1.0:g=2.0,"
+    "equalizer=f=4200:t=q:w=1.0:g=2.3,"
+    "equalizer=f=7200:t=q:w=1.1:g=1.4,"
+    "acompressor=threshold=0.06:ratio=2.3:attack=8:release=180:makeup=4.5:knee=2.5,"
+    "dynaudnorm=f=120:g=7:p=0.52:m=8,"
     "alimiter=limit=0.92",
 ).strip()
 VOICE_ENHANCE_SPEECH_FILTER = os.getenv(
     "HALALSTREAM_VOICE_ENHANCE_SPEECH_FILTER",
-    "highpass=f=120,lowpass=f=5200,afftdn=nf=-24,"
-    "equalizer=f=1500:t=q:w=1.1:g=2.8,"
-    "equalizer=f=3000:t=q:w=1.0:g=3.0,"
-    "acompressor=threshold=0.045:ratio=3.2:attack=6:release=160:makeup=6:knee=2.5,"
-    "dynaudnorm=f=120:g=7:p=0.58:m=10,"
+    "highpass=f=105,lowpass=f=7800,afftdn=nf=-24,"
+    "equalizer=f=260:t=q:w=1.0:g=-3.0,"
+    "equalizer=f=1700:t=q:w=1.0:g=2.4,"
+    "equalizer=f=3400:t=q:w=1.0:g=3.0,"
+    "equalizer=f=6200:t=q:w=1.2:g=1.8,"
+    "acompressor=threshold=0.05:ratio=2.8:attack=7:release=170:makeup=5.5:knee=2.5,"
+    "dynaudnorm=f=120:g=7:p=0.56:m=9,"
     "alimiter=limit=0.90",
 ).strip()
 MODAL_PURIFY_URL = os.getenv("HALALSTREAM_MODAL_PURIFY_URL", "").strip()
@@ -233,6 +237,7 @@ def health() -> Dict[str, Any]:
         "strict_residual_music_ratio_threshold": STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD,
         "strict_residual_music_absolute_threshold": STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD,
         "voice_enhance_enabled": VOICE_ENHANCE_ENABLED,
+        "voice_restore_profile": "natural_v2",
         "modal_purify_enabled": bool(MODAL_PURIFY_URL and MODAL_PURIFY_SECRET and requests is not None),
         "modal_purify_url_configured": bool(MODAL_PURIFY_URL),
         "max_active_processing_jobs": MAX_ACTIVE_PROCESSING_JOBS,
