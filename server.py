@@ -123,7 +123,7 @@ ALLOW_LINK_DOWNLOADS = os.getenv("HALALSTREAM_ALLOW_LINK_DOWNLOADS", "").strip()
 LINK_DOWNLOADS_RELIABLE = True
 YOUTUBE_CLIENT_FALLBACKS = tuple(
     () if client.strip().lower() in {"default", "auto"} else (client.strip(),)
-    for client in os.getenv("HALALSTREAM_YOUTUBE_CLIENTS", "android_vr,tv,web,mweb").split(",")
+    for client in os.getenv("HALALSTREAM_YOUTUBE_CLIENTS", "web,mweb").split(",")
     if client.strip()
 ) or ((),)
 YOUTUBE_SOCKET_TIMEOUT = int(os.getenv("HALALSTREAM_YOUTUBE_SOCKET_TIMEOUT", "12"))
@@ -263,7 +263,6 @@ def health() -> Dict[str, Any]:
         "yt_dlp_proxy": bool(YTDLP_PROXY),
         "youtube_pot_provider": bool(YOUTUBE_POT_BASE_URL),
         "youtube_fetch_pot": YOUTUBE_FETCH_POT,
-        "youtube_clients": [clients[0] if clients else "default" for clients in YOUTUBE_CLIENT_FALLBACKS],
         "youtube_remote_components": list(YOUTUBE_REMOTE_COMPONENTS),
         "message": "الخادم يعمل. اكتمال المعالجة يحتاج yt-dlp و ffmpeg، ومعهما إما demucs محلي أو عامل Modal.",
     }
@@ -377,12 +376,6 @@ def retry(job_id: str) -> Dict[str, str]:
         raise HTTPException(status_code=404, detail="لم يتم العثور على المهمة.")
     if job["status"] != "failed":
         raise HTTPException(status_code=409, detail="إعادة المحاولة متاحة فقط بعد فشل المعالجة.")
-    original_path = Path(job["original_path"]) if job.get("original_path") else None
-    if job.get("source_type") == "link" and (not original_path or not original_path.exists()):
-        raise HTTPException(
-            status_code=409,
-            detail="لم يُحفظ ملف لأن YouTube منع التنزيل. نزّل المقطع على جهازك ثم ارفعه من تبويب ملف.",
-        )
 
     clear_generated_outputs(job_id)
     update_job(
@@ -947,7 +940,7 @@ def download_link(job_id: str, url: str) -> Path:
 
     is_yt = is_youtube_url(url)
 
-    if is_yt and yt_dlp is not None:
+    if is_yt and yt_dlp is not None and not HOSTED_SPACE:
         for clients in youtube_download_clients(url):
             cleanup_partial_downloads(workdir)
             label = "، ".join(clients) if clients else "عام"
@@ -993,8 +986,6 @@ def download_link(job_id: str, url: str) -> Path:
 
 def youtube_download_clients(url: str) -> tuple[tuple[str, ...], ...]:
     if is_youtube_url(url):
-        if HOSTED_SPACE:
-            return YOUTUBE_CLIENT_FALLBACKS[:1]
         return YOUTUBE_CLIENT_FALLBACKS
     return ((),)
 
@@ -1064,28 +1055,22 @@ def cleanup_partial_downloads(workdir: Path) -> None:
 
 
 def youtube_download_error(errors: list[str]) -> str:
-    combined_errors = "\n".join(errors) if errors else "لم يصل تفصيل من yt-dlp."
-    if (
-        "Sign in to confirm" in combined_errors
-        or "not a bot" in combined_errors
-        or "cookies" in combined_errors.lower()
-        or "error.api.youtube.login" in combined_errors
-    ):
+    last_error = errors[-1] if errors else "لم يصل تفصيل من yt-dlp."
+    if "Sign in to confirm" in last_error or "not a bot" in last_error or "cookies" in last_error.lower():
         if YTDLP_PROXY:
             return (
                 "طلب YouTube إثبات أن الخادم ليس روبوتاً. ملف cookies أو البروكسي الحالي غير كافيين لهذا الرابط."
             )
         return (
-            "منع YouTube خادم الاستضافة من تنزيل هذا الرابط وطلب تحققاً بشرياً. "
-            "نزّل المقطع على جهازك ثم ارفعه من تبويب ملف، ولن تتأثر التنقية."
+            "طلب YouTube إثبات أن الخادم ليس روبوتاً. نحتاج ملف cookies صالحاً وبروكسي نظيفاً لتفعيل تنزيل هذا الرابط بثبات."
         )
-    if "UNEXPECTED_EOF_WHILE_READING" in combined_errors or "SSL" in combined_errors:
+    if "UNEXPECTED_EOF_WHILE_READING" in last_error or "SSL" in last_error:
         return (
             "تعذر تنزيل الرابط من YouTube داخل الاستضافة بسبب انقطاع اتصال SSL. "
             "حدّثنا الخادم ليجرب عدة قنوات تلقائياً، لكن إن تكرر الخطأ فغالباً أن الاستضافة تقطع اتصال YouTube مؤقتاً. "
             "جرّب مرة أخرى، أو ارفع الملف من جهازك عبر تبويب ملف."
         )
-    if "HTTP Error 403" in combined_errors or "Forbidden" in combined_errors:
+    if "HTTP Error 403" in last_error or "Forbidden" in last_error:
         return "منع YouTube تنزيل هذا الرابط مؤقتاً من خادم الاستضافة. جرّب رابطاً آخر أو ارفع الملف من جهازك."
     return "تعذر تنزيل الرابط بعد عدة محاولات. جرّب رابطاً آخر أو ارفع الملف من جهازك."
 
@@ -2130,8 +2115,6 @@ def public_job(job_id: str) -> Optional[Dict[str, Any]]:
     public["can_download_original"] = job["status"] in {"clean", "direct"}
     public["can_purify"] = job["status"] == "needs_consent"
     public["can_download_purified"] = job["status"] == "complete"
-    original_path = Path(job["original_path"]) if job.get("original_path") else None
-    public["can_retry_saved_file"] = bool(original_path and original_path.exists())
     if public["can_download_original"]:
         public["download_url"] = f"/api/jobs/{job_id}/download?kind=original"
         public["download_urls"] = {
