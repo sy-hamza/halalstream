@@ -17,6 +17,7 @@ import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urljoin, urlparse
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -121,6 +122,16 @@ MODAL_PURIFY_TIMEOUT = max(300, int(os.getenv("HALALSTREAM_MODAL_PURIFY_TIMEOUT"
 TUNELIO_API_KEY = os.getenv("HALALSTREAM_TUNELIO_API_KEY", "").strip()
 TUNELIO_API_URL = os.getenv("HALALSTREAM_TUNELIO_API_URL", "https://tunelio.dev").rstrip("/")
 TUNELIO_TIMEOUT = max(30, int(os.getenv("HALALSTREAM_TUNELIO_TIMEOUT", "180")))
+ENABLE_TUNELIO_FALLBACK = os.getenv("HALALSTREAM_ENABLE_TUNELIO_FALLBACK", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
+NOADSDL_ENABLED = os.getenv("HALALSTREAM_NOADSDL_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+NOADSDL_API_URL = os.getenv("HALALSTREAM_NOADSDL_API_URL", "https://noadsdl.com").rstrip("/")
+NOADSDL_API_TIMEOUT = max(10, int(os.getenv("HALALSTREAM_NOADSDL_API_TIMEOUT", "40")))
+NOADSDL_JOB_TIMEOUT = max(30, int(os.getenv("HALALSTREAM_NOADSDL_JOB_TIMEOUT", "180")))
+NOADSDL_DOWNLOAD_TIMEOUT = max(30, int(os.getenv("HALALSTREAM_NOADSDL_DOWNLOAD_TIMEOUT", "120")))
 HOSTED_SPACE = bool(os.getenv("SPACE_ID") or os.getenv("SPACE_HOST"))
 ALLOW_LINK_DOWNLOADS = os.getenv("HALALSTREAM_ALLOW_LINK_DOWNLOADS", "").strip().lower() in {"1", "true", "yes"}
 LINK_DOWNLOADS_RELIABLE = True
@@ -254,7 +265,10 @@ def health() -> Dict[str, Any]:
         "voice_restore_profile": "raw_roformer_v1",
         "modal_purify_enabled": bool(MODAL_PURIFY_URL and MODAL_PURIFY_SECRET and requests is not None),
         "modal_purify_url_configured": bool(MODAL_PURIFY_URL),
-        "tunelio_download_enabled": bool(TUNELIO_API_KEY and requests is not None),
+        "noadsdl_download_enabled": bool(NOADSDL_ENABLED and requests is not None),
+        "tunelio_download_enabled": bool(
+            ENABLE_TUNELIO_FALLBACK and TUNELIO_API_KEY and requests is not None
+        ),
         "max_active_processing_jobs": MAX_ACTIVE_PROCESSING_JOBS,
         "cuda_available": (lambda: __import__("torch").cuda.is_available() if has_module("torch") else False)(),
         "hosted_space": HOSTED_SPACE,
@@ -859,6 +873,128 @@ def download_via_cobalt(job_id: str, url: str, workdir: Path) -> Path:
     raise RuntimeError("فشلت جميع محاولات التنزيل المباشرة وعبر الخوادم المساندة.")
 
 
+def download_via_noadsdl(job_id: str, url: str, workdir: Path) -> tuple[Path, str]:
+    if requests is None or not NOADSDL_ENABLED:
+        raise RuntimeError("خادم التنزيل المجاني غير مفعّل.")
+
+    api_host = urlparse(NOADSDL_API_URL).netloc.lower()
+
+    def trusted_api_url(path: str) -> str:
+        target = urljoin(f"{NOADSDL_API_URL}/", str(path))
+        if urlparse(target).netloc.lower() != api_host:
+            raise RuntimeError("أعاد خادم التنزيل رابطاً خارجياً غير موثوق.")
+        return target
+
+    session = requests.Session()
+    session.headers.update(
+        {
+            "Accept": "application/json",
+            "User-Agent": COBALT_USER_AGENT,
+        }
+    )
+
+    update_job(job_id, message="نطلب المقطع من خادم التنزيل المجاني.")
+    info_response = session.get(
+        f"{NOADSDL_API_URL}/api/video-info",
+        params={"url": url},
+        timeout=(10, NOADSDL_API_TIMEOUT),
+    )
+    info_response.raise_for_status()
+    info = info_response.json()
+    if not info.get("success"):
+        raise RuntimeError(str(info.get("error") or "تعذر استخراج بيانات المقطع."))
+
+    selected_format_id = "720"
+    selected_height = -1
+    for name, format_info in (info.get("video_formats") or {}).items():
+        if not isinstance(format_info, dict):
+            continue
+        resolution = str(format_info.get("resolution") or "")
+        try:
+            height = int(resolution.rsplit("x", 1)[-1])
+        except ValueError:
+            height = 720 if "720" in str(name) else 0
+        if 0 < height <= 720 and height > selected_height:
+            selected_height = height
+            selected_format_id = str(format_info.get("format_id") or height)
+
+    start_response = session.get(
+        f"{NOADSDL_API_URL}/download",
+        params={
+            "url": url,
+            "format": "mp4",
+            "format_id": selected_format_id,
+            "async": "1",
+        },
+        timeout=(10, NOADSDL_API_TIMEOUT),
+    )
+    start_response.raise_for_status()
+    started = start_response.json()
+    status_url = started.get("status_url")
+    direct_url = started.get("direct_url") or started.get("download_url")
+    if not status_url and not direct_url:
+        raise RuntimeError(str(started.get("error") or "لم يبدأ خادم التنزيل المهمة."))
+
+    deadline = time.monotonic() + NOADSDL_JOB_TIMEOUT
+    last_message_at = 0.0
+    while not direct_url:
+        if time.monotonic() >= deadline:
+            raise RuntimeError("انتهت مهلة انتظار خادم التنزيل المجاني.")
+        status_response = session.get(
+            trusted_api_url(str(status_url)),
+            timeout=(10, NOADSDL_API_TIMEOUT),
+        )
+        status_response.raise_for_status()
+        status_payload = status_response.json()
+        status = str(status_payload.get("status") or "").lower()
+        direct_url = status_payload.get("direct_url") or status_payload.get("download_url")
+        if status in {"failed", "error"}:
+            raise RuntimeError(str(status_payload.get("message") or "فشل تجهيز المقطع."))
+        now = time.monotonic()
+        if now - last_message_at >= 5:
+            update_job(job_id, message="خادم التنزيل المجاني يجهز ملف MP4.")
+            last_message_at = now
+        if not direct_url:
+            time.sleep(2)
+
+    update_job(job_id, message="اكتمل التجهيز المجاني. ننقل الملف إلى خادم المعالجة.")
+    partial_path = workdir / "downloaded-noads.part"
+    out_path = workdir / "downloaded-noads.mp4"
+    with session.get(
+        trusted_api_url(str(direct_url)),
+        stream=True,
+        timeout=(15, NOADSDL_DOWNLOAD_TIMEOUT),
+    ) as download:
+        download.raise_for_status()
+        try:
+            content_length = int(download.headers.get("Content-Length") or "0")
+        except ValueError:
+            content_length = 0
+        if content_length > MAX_REMOTE_DOWNLOAD_BYTES:
+            raise RuntimeError(
+                f"حجم الملف من الرابط أكبر من الحد المسموح ({MAX_REMOTE_DOWNLOAD_BYTES // (1024 * 1024)} MB)."
+            )
+
+        downloaded = 0
+        with partial_path.open("wb") as target:
+            for chunk in download.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                downloaded += len(chunk)
+                if downloaded > MAX_REMOTE_DOWNLOAD_BYTES:
+                    partial_path.unlink(missing_ok=True)
+                    raise RuntimeError(
+                        f"حجم الملف من الرابط أكبر من الحد المسموح ({MAX_REMOTE_DOWNLOAD_BYTES // (1024 * 1024)} MB)."
+                    )
+                target.write(chunk)
+
+    if not partial_path.exists() or partial_path.stat().st_size <= 0:
+        partial_path.unlink(missing_ok=True)
+        raise RuntimeError("أعاد خادم التنزيل المجاني ملفاً فارغاً.")
+    partial_path.replace(out_path)
+    return out_path, str(info.get("title") or "مقطع من YouTube")
+
+
 def download_via_tunelio(job_id: str, url: str, workdir: Path) -> tuple[Path, str]:
     if requests is None or not TUNELIO_API_KEY:
         raise RuntimeError("خدمة تنزيل YouTube الأساسية غير مفعّلة.")
@@ -1008,6 +1144,22 @@ def download_link(job_id: str, url: str) -> Path:
 
     if is_yt:
         try:
+            media_path, title = download_via_noadsdl(job_id, url, workdir)
+            update_job(
+                job_id,
+                original_path=str(media_path),
+                title=title,
+                status="extracting",
+                stage="استخراج الصوت",
+                progress=24,
+                message="اكتمل التحميل المجاني. نستخرج المسار الصوتي الآن.",
+            )
+            return media_path
+        except Exception as exc:
+            download_errors.append(f"NoAdsDL: {exc}")
+            update_job(job_id, message="تعذر الخادم المجاني الأساسي. نجرب خادماً مجتمعياً.")
+
+        try:
             media_path = download_via_cobalt(job_id, url, workdir)
             update_job(
                 job_id,
@@ -1023,7 +1175,7 @@ def download_link(job_id: str, url: str) -> Path:
             download_errors.append(f"Cobalt: {exc}")
             update_job(job_id, message="تعذرت الخوادم المجانية. نجرب المسار الاحتياطي.")
 
-    if is_yt and TUNELIO_API_KEY and requests is not None:
+    if is_yt and ENABLE_TUNELIO_FALLBACK and TUNELIO_API_KEY and requests is not None:
         try:
             media_path, title = download_via_tunelio(job_id, url, workdir)
             update_job(
