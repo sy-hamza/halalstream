@@ -71,7 +71,7 @@ MAX_REMOTE_DOWNLOAD_BYTES = max(
     1 * 1024 * 1024,
     int(os.getenv("HALALSTREAM_MAX_REMOTE_DOWNLOAD_BYTES", str(500 * 1024 * 1024))),
 )
-COBALT_PARALLELISM = max(1, int(os.getenv("HALALSTREAM_COBALT_PARALLELISM", "5")))
+COBALT_PARALLELISM = max(1, int(os.getenv("HALALSTREAM_COBALT_PARALLELISM", "1")))
 COBALT_API_TIMEOUT = max(3, int(os.getenv("HALALSTREAM_COBALT_API_TIMEOUT", "8")))
 COBALT_DOWNLOAD_TIMEOUT = max(10, int(os.getenv("HALALSTREAM_COBALT_DOWNLOAD_TIMEOUT", "25")))
 VERIFY_PURIFIED_OUTPUT = os.getenv("HALALSTREAM_VERIFY_PURIFIED_OUTPUT", "1").strip().lower() in {"1", "true", "yes"}
@@ -143,23 +143,18 @@ YOUTUBE_REMOTE_COMPONENTS = tuple(
 )
 YTDLP_PROXY = os.getenv("HALALSTREAM_YTDLP_PROXY", "").strip()
 
-COBALT_FALLBACK_APIS = [
-    "https://api.cobalt.blackcat.sweeux.org/",
-    "https://api.qwkuns.me/",
-    "https://cobaltapi.kittycat.boo/",
-    "https://cobaltapi.squair.xyz/",
-    "https://dog.kittycat.boo/",
-    "https://fox.kittycat.boo/",
-    "https://grapefruit.clxxped.lol/",
-    "https://lime.clxxped.lol/",
-    "https://melon.clxxped.lol/",
-    "https://nuko-c.meowing.de/",
-    "https://subito-c.meowing.de/",
-    "https://cobalt.alpha.wolfy.love/",
-    "https://cobalt.omega.wolfy.love/",
-    "https://blossom.imput.net/",
-    "https://sunny.imput.net/",
-]
+COBALT_FALLBACK_APIS = tuple(
+    api.strip().rstrip("/") + "/"
+    for api in os.getenv(
+        "HALALSTREAM_COBALT_APIS",
+        "https://rue-cobalt.xenon.zone/,https://cobaltapi.kittycat.boo/",
+    ).split(",")
+    if api.strip()
+)
+COBALT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 ASSETS_DIR.mkdir(exist_ok=True)
 STORAGE.mkdir(exist_ok=True)
@@ -944,7 +939,7 @@ def try_cobalt_download(job_id: str, url: str, workdir: Path, api_url: str, inde
         headers={
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": COBALT_USER_AGENT,
         },
         method="POST",
     )
@@ -969,7 +964,7 @@ def try_cobalt_download(job_id: str, url: str, workdir: Path, api_url: str, inde
     suffix = safe_suffix(filename or "downloaded.mp4")
     partial_path = workdir / f"downloaded-{index}.part"
     out_path = workdir / f"downloaded-{index}{suffix}"
-    dl_req = urllib.request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
+    dl_req = urllib.request.Request(download_url, headers={"User-Agent": COBALT_USER_AGENT})
     with urllib.request.urlopen(dl_req, context=context, timeout=COBALT_DOWNLOAD_TIMEOUT) as dl_res:
         try:
             content_length = int(dl_res.headers.get("Content-Length") or "0")
@@ -1011,6 +1006,23 @@ def download_link(job_id: str, url: str) -> Path:
 
     is_yt = is_youtube_url(url)
 
+    if is_yt:
+        try:
+            media_path = download_via_cobalt(job_id, url, workdir)
+            update_job(
+                job_id,
+                original_path=str(media_path),
+                title=media_path.name,
+                status="extracting",
+                stage="استخراج الصوت",
+                progress=24,
+                message="اكتمل التحميل عبر خادم مجاني. نستخرج المسار الصوتي الآن.",
+            )
+            return media_path
+        except Exception as exc:
+            download_errors.append(f"Cobalt: {exc}")
+            update_job(job_id, message="تعذرت الخوادم المجانية. نجرب المسار الاحتياطي.")
+
     if is_yt and TUNELIO_API_KEY and requests is not None:
         try:
             media_path, title = download_via_tunelio(job_id, url, workdir)
@@ -1026,7 +1038,7 @@ def download_link(job_id: str, url: str) -> Path:
             return media_path
         except Exception as exc:
             download_errors.append(f"Tunelio: {exc}")
-            update_job(job_id, message="تعذر خادم التنزيل الأساسي. نجرب المسارات الاحتياطية.")
+            update_job(job_id, message="تعذر خادم التنزيل الاحتياطي. نجرب التنزيل المباشر إن توفر.")
 
     if is_yt and yt_dlp is not None and not HOSTED_SPACE:
         for clients in youtube_download_clients(url):
@@ -1049,10 +1061,9 @@ def download_link(job_id: str, url: str) -> Path:
         title = info.get("title") or "مقطع من رابط"
     else:
         if is_yt:
-            update_job(job_id, message="تعذر التنزيل المباشر. نحاول التنزيل عبر الخوادم المساندة...")
-        else:
-            update_job(job_id, message="رابط خارجي. نحاول التنزيل عبر الخوادم المساندة...")
-            
+            raise RuntimeError(youtube_download_error(download_errors))
+
+        update_job(job_id, message="رابط خارجي. نحاول التنزيل عبر الخوادم المساندة...")
         try:
             media_path = download_via_cobalt(job_id, url, workdir)
             title = media_path.name
