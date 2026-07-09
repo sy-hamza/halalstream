@@ -176,6 +176,13 @@ async function startPurify() {
 }
 
 retryButton.addEventListener("click", async () => {
+  if (retryButton.dataset.action === "upload") {
+    setMode("file");
+    mediaForm.scrollIntoView({ behavior: "smooth", block: "start" });
+    window.setTimeout(() => mediaFile.click(), 250);
+    return;
+  }
+
   if (!currentJobId) {
     showError("لا توجد مهمة لإعادة المحاولة.");
     return;
@@ -532,7 +539,7 @@ function renderJob(job) {
     const ratioPct = Math.round((job.instrumental_ratio || 0) * 100);
     const completeRatioEl = document.querySelector("#complete-ratio");
     if (completeRatioEl) {
-      completeRatioEl.textContent = `نسبة المعازف قبل التنقية: ${ratioPct}% | طُبّقت تنقية صارمة مع ترميم طبيعي للصوت`;
+      completeRatioEl.textContent = `نسبة المعازف قبل التنقية: ${ratioPct}% | عزل RoFormer مع مسار صوت خام بلا فلاتر`;
       completeRatioEl.hidden = false;
     }
     completeCard.hidden = false;
@@ -544,6 +551,10 @@ function renderJob(job) {
 
   if (job.status === "failed") {
     errorMessage.textContent = job.message || "حدث خطأ غير متوقع أثناء المعالجة.";
+    retryButton.dataset.action = job.can_retry_saved_file ? "retry" : "upload";
+    retryButton.textContent = job.can_retry_saved_file
+      ? "إعادة المحاولة من الملف المحفوظ"
+      : "اختيار ملف من الجهاز";
     renderLocalHelper(job);
     errorCard.hidden = false;
     window.setTimeout(() => {
