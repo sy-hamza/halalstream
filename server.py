@@ -92,7 +92,7 @@ UVR_RESCUE_MODELS = tuple(
     if model.strip()
 )
 UVR_MODEL_DIR = os.getenv("HALALSTREAM_UVR_MODEL_DIR", str(STORAGE / "audio-separator-models"))
-VOICE_ENHANCE_ENABLED = os.getenv("HALALSTREAM_VOICE_ENHANCE_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+VOICE_ENHANCE_ENABLED = os.getenv("HALALSTREAM_VOICE_ENHANCE_ENABLED", "0").strip().lower() not in {"0", "false", "no"}
 VOICE_ENHANCE_FILTER = os.getenv(
     "HALALSTREAM_VOICE_ENHANCE_FILTER",
     "highpass=f=75,lowpass=f=11200,afftdn=nf=-26,"
@@ -253,7 +253,7 @@ def health() -> Dict[str, Any]:
         "strict_residual_music_ratio_threshold": STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD,
         "strict_residual_music_absolute_threshold": STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD,
         "voice_enhance_enabled": VOICE_ENHANCE_ENABLED,
-        "voice_restore_profile": "natural_v2",
+        "voice_restore_profile": "raw_roformer_v1",
         "modal_purify_enabled": bool(MODAL_PURIFY_URL and MODAL_PURIFY_SECRET and requests is not None),
         "modal_purify_url_configured": bool(MODAL_PURIFY_URL),
         "max_active_processing_jobs": MAX_ACTIVE_PROCESSING_JOBS,
@@ -808,9 +808,8 @@ def purify_job(job_id: str) -> None:
             purified_vocals,
             "purified-audio.m4a",
             86,
-            "نحسّن وضوح الصوت المنقّى ونجهز نسخة التحميل.",
-            filter_vocals=True,
-            speech_only=bool(purification_result and purification_result.get("speech_rescue")),
+            "نجهز مسار الصوت المعزول كما أنتجه النموذج بلا فلاتر تغيّر طبيعته.",
+            filter_vocals=False,
         )
         out = mux_audio_to_video(job_id, original, audio_out)
         update_job(
@@ -1242,25 +1241,21 @@ def uvr_rescue_result_for_persistent_music(
 
     update_job(
         job_id,
-        progress=91,
-        purification_mode="uvr_rescue",
-        message="بقي أثر موسيقي واضح. نستخدم نموذج UVR/RoFormer أقوى بدل كتم الصوت البشري.",
+        progress=88,
+        purification_mode="roformer_raw",
+        message="نشغّل RoFormer لعزل المعازف مع إبقاء مسار الصوت البشري الخام.",
     )
     candidates: list[tuple[Path, float, float, str]] = []
     for index, model_filename in enumerate(UVR_RESCUE_MODELS):
         try:
-            update_job(job_id, message=f"نجرب نموذج عزل إضافي ({index + 1}/{len(UVR_RESCUE_MODELS)}).")
+            update_job(job_id, message=f"نشغّل نموذج RoFormer ({index + 1}/{len(UVR_RESCUE_MODELS)}) مع إبقاء الصوت خاماً.")
             uvr_vocals = separate_vocals_with_uvr(job_id, source_audio, model_filename, index)
-            add_rescue_candidates(candidates, job_id, uvr_vocals, instrumental_path, "uvr_rescue")
+            ratio, absolute = estimate_residual_music_bleed(uvr_vocals, instrumental_path)
+            candidates.append((uvr_vocals, ratio, absolute, "roformer_raw"))
             if best_candidate_is_strict_safe(candidates):
                 break
         except Exception:
             continue
-
-    try:
-        add_rescue_candidates(candidates, job_id, vocals_path, instrumental_path, "demucs")
-    except Exception:
-        pass
 
     if not candidates:
         raise RuntimeError("انتهى نموذج UVR بدون إنتاج مرشح صوتي صالح.")
@@ -1274,7 +1269,7 @@ def uvr_rescue_result_for_persistent_music(
         "absolute": absolute,
         "safe": ratio < STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD or absolute < STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD,
         "uvr_rescue": True,
-        "speech_rescue": "speech_rescue" in mode,
+        "natural_voice": True,
         "previous_ratio": float(best.get("ratio") or 0.0),
     }
 
@@ -1363,63 +1358,32 @@ def write_silence_like(reference_audio: Path, out: Path) -> Path:
 
 
 def purify_with_retries(job_id: str, source_audio: Path, vocals_path: Path, instrumental_path: Path, source_ratio: float = 0.0) -> Dict[str, Any]:
-    modes = ["balanced", "strong", "extreme"] if VERIFY_PURIFIED_OUTPUT else ["balanced"]
-    best: Optional[Dict[str, Any]] = None
-    strict_source = source_ratio >= STRICT_MUSIC_RATIO_THRESHOLD
-    for index, mode in enumerate(modes):
-        profile = purification_profile(mode)
-        update_job(
-            job_id,
-            progress=min(90, 84 + index * 2),
-            message=profile["message"],
-            purification_mode=mode,
-        )
-        candidate = purify_vocal_stem(vocals_path, instrumental_path, job_id, mode=mode)
-        ratio, absolute = estimate_residual_music_bleed(candidate, instrumental_path)
-        result = {
-            "path": candidate,
-            "mode": mode,
-            "ratio": ratio,
-            "absolute": absolute,
-            "safe": ratio < RESIDUAL_MUSIC_RATIO_THRESHOLD or absolute < RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD,
-        }
-        if best is None or ratio < best["ratio"]:
-            best = result
-        update_job(job_id, residual_music_ratio=round(ratio, 4), purification_mode=mode)
-        if result["safe"] and not strict_source:
-            return result
-        if index < len(modes) - 1:
-            update_job(
-                job_id,
-                message="بقي أثر موسيقي بعد المحاولة الحالية. نعيد التنقية بنمط أقوى.",
-            )
-    assert best is not None
-    if strict_source and (
-        best["ratio"] >= STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD
-        or best["absolute"] >= STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD
-    ):
-        update_job(
-            job_id,
-            residual_music_ratio=round(best["ratio"], 4),
-            purification_mode="uvr_rescue",
-            message="بقي أثر موسيقي واضح بعد أقوى تنقية. نستخدم نموذج عزل إضافي أقوى بدل كتم الصوت كاملاً.",
-        )
-        try:
-            return uvr_rescue_result_for_persistent_music(job_id, source_audio, vocals_path, instrumental_path, best)
-        except Exception:
-            update_job(
-                job_id,
-                purification_mode="speech_rescue",
-                message="تعذر تشغيل نموذج UVR الإضافي. نستخدم وضع إنقاذ الكلام بفلترة أشد بدل كتم الصوت كاملاً.",
-            )
-            return speech_rescue_result_for_persistent_music(job_id, vocals_path, instrumental_path, best)
+    raw_ratio, raw_absolute = estimate_residual_music_bleed(vocals_path, instrumental_path)
+    demucs_result = {
+        "path": vocals_path,
+        "mode": "demucs_raw_fallback",
+        "ratio": raw_ratio,
+        "absolute": raw_absolute,
+        "safe": raw_ratio < RESIDUAL_MUSIC_RATIO_THRESHOLD or raw_absolute < RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD,
+        "natural_voice": True,
+    }
     update_job(
         job_id,
-        residual_music_ratio=round(best["ratio"], 4),
-        purification_mode=best["mode"],
-        message="استخدمنا أقوى تنقية متاحة لهذا المقطع. قد يتأثر الصوت البشري لكننا نحاول تقليل المعازف قدر الإمكان.",
+        progress=86,
+        message="نعزل المعازف بنموذج RoFormer مع إبقاء الصوت البشري بلا فلاتر إضافية.",
+        residual_music_ratio=round(raw_ratio, 4),
+        purification_mode=demucs_result["mode"],
     )
-    return best
+    try:
+        return uvr_rescue_result_for_persistent_music(
+            job_id,
+            source_audio,
+            vocals_path,
+            instrumental_path,
+            demucs_result,
+        )
+    except Exception:
+        return demucs_result
 
 
 def completion_message(purification_result: Optional[Dict[str, Any]]) -> str:
@@ -1432,7 +1396,9 @@ def completion_message(purification_result: Optional[Dict[str, Any]]) -> str:
     if purification_result.get("speech_rescue"):
         return "بقي أثر موسيقي بعد أقوى تنقية، فشغلنا وضع إنقاذ الكلام بفلترة أشد بدل كتم الصوت كاملاً."
     if purification_result.get("uvr_rescue"):
-        return "بقي أثر موسيقي بعد تنقية Demucs، فشغلنا نموذج UVR/RoFormer أقوى للحفاظ على الصوت البشري بدل كتمه."
+        return "تم عزل المعازف بنموذج RoFormer مع إبقاء مسار الصوت البشري خاماً بلا فلاتر تغيّر طبيعته."
+    if purification_result.get("natural_voice"):
+        return "تم عزل المعازف مع إبقاء مسار الصوت البشري خاماً بلا فلاتر تغيّر طبيعته."
     if purification_result.get("safe"):
         return "تم بحمد الله عزل مسار المعازف وإعداد نسخة منقّاة قدر الإمكان. الملف جاهز للتحميل."
     return "اكتملت أقوى محاولة تنقية متاحة. قد يتأثر الصوت البشري، لكننا أعدنا المحاولة لتقليل بقايا المعازف قدر الإمكان."

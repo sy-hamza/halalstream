@@ -38,7 +38,7 @@ UVR_RESCUE_MODELS = tuple(
     if model.strip()
 )
 UVR_MODEL_DIR = os.getenv("HALALSTREAM_UVR_MODEL_DIR", "/root/.cache/audio-separator-models")
-VOICE_ENHANCE_ENABLED = os.getenv("HALALSTREAM_VOICE_ENHANCE_ENABLED", "1") != "0"
+VOICE_ENHANCE_ENABLED = os.getenv("HALALSTREAM_VOICE_ENHANCE_ENABLED", "0") != "0"
 VOICE_ENHANCE_FILTER = os.getenv(
     "HALALSTREAM_VOICE_ENHANCE_FILTER",
     "highpass=f=75,lowpass=f=11200,afftdn=nf=-26,"
@@ -134,8 +134,7 @@ async def purify(
             workdir,
             result["path"],
             "purified-audio.m4a",
-            filter_vocals=True,
-            speech_only=bool(result.get("speech_rescue")),
+            filter_vocals=False,
         )
         return {
             "status": "complete",
@@ -342,16 +341,12 @@ def uvr_rescue_result_for_persistent_music(
     for index, model_filename in enumerate(UVR_RESCUE_MODELS):
         try:
             uvr_vocals = separate_vocals_with_uvr(workdir, source_audio, model_filename, index)
-            add_rescue_candidates(candidates, workdir, uvr_vocals, instrumental_path, "uvr_rescue")
+            ratio, absolute = estimate_residual_music_bleed(uvr_vocals, instrumental_path)
+            candidates.append((uvr_vocals, ratio, absolute, "roformer_raw"))
             if best_candidate_is_strict_safe(candidates):
                 break
         except Exception:
             continue
-
-    try:
-        add_rescue_candidates(candidates, workdir, vocals_path, instrumental_path, "demucs")
-    except Exception:
-        pass
 
     if not candidates:
         raise RuntimeError("UVR rescue finished without usable candidates.")
@@ -364,7 +359,7 @@ def uvr_rescue_result_for_persistent_music(
         "absolute": absolute,
         "safe": ratio < STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD or absolute < STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD,
         "uvr_rescue": True,
-        "speech_rescue": "speech_rescue" in mode,
+        "natural_voice": True,
         "previous_ratio": float(best.get("ratio") or 0.0),
     }
 
@@ -450,32 +445,25 @@ def write_silence_like(reference_audio: Path, out: Path) -> Path:
 
 
 def purify_with_retries(workdir: Path, source_audio: Path, vocals_path: Path, instrumental_path: Path, source_ratio: float = 0.0) -> Dict[str, Any]:
-    best: Optional[Dict[str, Any]] = None
-    strict_source = source_ratio >= STRICT_MUSIC_RATIO_THRESHOLD
-    for mode in ["balanced", "strong", "extreme"]:
-        candidate = purify_vocal_stem(vocals_path, instrumental_path, workdir, mode)
-        ratio, absolute = estimate_residual_music_bleed(candidate, instrumental_path)
-        result = {
-            "path": candidate,
-            "mode": mode,
-            "ratio": ratio,
-            "absolute": absolute,
-            "safe": ratio < RESIDUAL_MUSIC_RATIO_THRESHOLD or absolute < RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD,
-        }
-        if best is None or ratio < best["ratio"]:
-            best = result
-        if result["safe"] and not strict_source:
-            return result
-    assert best is not None
-    if strict_source and (
-        best["ratio"] >= STRICT_RESIDUAL_MUSIC_RATIO_THRESHOLD
-        or best["absolute"] >= STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD
-    ):
-        try:
-            return uvr_rescue_result_for_persistent_music(workdir, source_audio, vocals_path, instrumental_path, best)
-        except Exception:
-            return speech_rescue_result_for_persistent_music(workdir, vocals_path, instrumental_path, best)
-    return best
+    raw_ratio, raw_absolute = estimate_residual_music_bleed(vocals_path, instrumental_path)
+    demucs_result = {
+        "path": vocals_path,
+        "mode": "demucs_raw_fallback",
+        "ratio": raw_ratio,
+        "absolute": raw_absolute,
+        "safe": raw_ratio < RESIDUAL_MUSIC_RATIO_THRESHOLD or raw_absolute < RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD,
+        "natural_voice": True,
+    }
+    try:
+        return uvr_rescue_result_for_persistent_music(
+            workdir,
+            source_audio,
+            vocals_path,
+            instrumental_path,
+            demucs_result,
+        )
+    except Exception:
+        return demucs_result
 
 
 def completion_message(result: Dict[str, Any]) -> str:
@@ -486,7 +474,9 @@ def completion_message(result: Dict[str, Any]) -> str:
     if result.get("speech_rescue"):
         return "بقي أثر موسيقي بعد أقوى تنقية، فشغلنا وضع إنقاذ الكلام بفلترة أشد بدل كتم الصوت كاملاً."
     if result.get("uvr_rescue"):
-        return "بقي أثر موسيقي بعد تنقية Demucs، فشغلنا نموذج UVR/RoFormer أقوى للحفاظ على الصوت البشري بدل كتمه."
+        return "تم عزل المعازف بنموذج RoFormer مع إبقاء مسار الصوت البشري خاماً بلا فلاتر تغيّر طبيعته."
+    if result.get("natural_voice"):
+        return "تم عزل المعازف مع إبقاء مسار الصوت البشري خاماً بلا فلاتر تغيّر طبيعته."
     if result.get("safe"):
         return "تم بحمد الله إعداد نسخة منقّاة عبر عامل Modal. الملف جاهز للتحميل."
     return "اكتملت أقوى محاولة تنقية متاحة عبر Modal. قد يتأثر الصوت البشري، لكننا أعدنا المحاولة لتقليل بقايا المعازف قدر الإمكان."
