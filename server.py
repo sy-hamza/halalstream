@@ -123,7 +123,7 @@ ALLOW_LINK_DOWNLOADS = os.getenv("HALALSTREAM_ALLOW_LINK_DOWNLOADS", "").strip()
 LINK_DOWNLOADS_RELIABLE = True
 YOUTUBE_CLIENT_FALLBACKS = tuple(
     () if client.strip().lower() in {"default", "auto"} else (client.strip(),)
-    for client in os.getenv("HALALSTREAM_YOUTUBE_CLIENTS", "web,mweb").split(",")
+    for client in os.getenv("HALALSTREAM_YOUTUBE_CLIENTS", "android_vr,tv,web,mweb").split(",")
     if client.strip()
 ) or ((),)
 YOUTUBE_SOCKET_TIMEOUT = int(os.getenv("HALALSTREAM_YOUTUBE_SOCKET_TIMEOUT", "12"))
@@ -263,6 +263,7 @@ def health() -> Dict[str, Any]:
         "yt_dlp_proxy": bool(YTDLP_PROXY),
         "youtube_pot_provider": bool(YOUTUBE_POT_BASE_URL),
         "youtube_fetch_pot": YOUTUBE_FETCH_POT,
+        "youtube_clients": [clients[0] if clients else "default" for clients in YOUTUBE_CLIENT_FALLBACKS],
         "youtube_remote_components": list(YOUTUBE_REMOTE_COMPONENTS),
         "message": "الخادم يعمل. اكتمال المعالجة يحتاج yt-dlp و ffmpeg، ومعهما إما demucs محلي أو عامل Modal.",
     }
@@ -940,7 +941,7 @@ def download_link(job_id: str, url: str) -> Path:
 
     is_yt = is_youtube_url(url)
 
-    if is_yt and yt_dlp is not None and not HOSTED_SPACE:
+    if is_yt and yt_dlp is not None:
         for clients in youtube_download_clients(url):
             cleanup_partial_downloads(workdir)
             label = "، ".join(clients) if clients else "عام"
