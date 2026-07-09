@@ -118,6 +118,9 @@ VOICE_ENHANCE_SPEECH_FILTER = os.getenv(
 MODAL_PURIFY_URL = os.getenv("HALALSTREAM_MODAL_PURIFY_URL", "").strip()
 MODAL_PURIFY_SECRET = os.getenv("HALALSTREAM_MODAL_SECRET", "").strip()
 MODAL_PURIFY_TIMEOUT = max(300, int(os.getenv("HALALSTREAM_MODAL_PURIFY_TIMEOUT", "1800")))
+TUNELIO_API_KEY = os.getenv("HALALSTREAM_TUNELIO_API_KEY", "").strip()
+TUNELIO_API_URL = os.getenv("HALALSTREAM_TUNELIO_API_URL", "https://tunelio.dev").rstrip("/")
+TUNELIO_TIMEOUT = max(30, int(os.getenv("HALALSTREAM_TUNELIO_TIMEOUT", "180")))
 HOSTED_SPACE = bool(os.getenv("SPACE_ID") or os.getenv("SPACE_HOST"))
 ALLOW_LINK_DOWNLOADS = os.getenv("HALALSTREAM_ALLOW_LINK_DOWNLOADS", "").strip().lower() in {"1", "true", "yes"}
 LINK_DOWNLOADS_RELIABLE = True
@@ -256,6 +259,7 @@ def health() -> Dict[str, Any]:
         "voice_restore_profile": "raw_roformer_v1",
         "modal_purify_enabled": bool(MODAL_PURIFY_URL and MODAL_PURIFY_SECRET and requests is not None),
         "modal_purify_url_configured": bool(MODAL_PURIFY_URL),
+        "tunelio_download_enabled": bool(TUNELIO_API_KEY and requests is not None),
         "max_active_processing_jobs": MAX_ACTIVE_PROCESSING_JOBS,
         "cuda_available": (lambda: __import__("torch").cuda.is_available() if has_module("torch") else False)(),
         "hosted_space": HOSTED_SPACE,
@@ -860,6 +864,73 @@ def download_via_cobalt(job_id: str, url: str, workdir: Path) -> Path:
     raise RuntimeError("فشلت جميع محاولات التنزيل المباشرة وعبر الخوادم المساندة.")
 
 
+def download_via_tunelio(job_id: str, url: str, workdir: Path) -> tuple[Path, str]:
+    if requests is None or not TUNELIO_API_KEY:
+        raise RuntimeError("خدمة تنزيل YouTube الأساسية غير مفعّلة.")
+
+    update_job(job_id, message="نجهز رابط YouTube عبر خادم التنزيل السريع.")
+    response = requests.get(
+        f"{TUNELIO_API_URL}/create",
+        params={"quality": "720p", "url": url},
+        headers={"Authorization": f"Bearer {TUNELIO_API_KEY}"},
+        timeout=60,
+    )
+    if response.status_code != 200:
+        try:
+            detail = response.json().get("message") or response.json().get("error")
+        except Exception:
+            detail = response.text[:300]
+        raise RuntimeError(f"فشلت خدمة تنزيل YouTube: HTTP {response.status_code} {detail or ''}".strip())
+
+    payload = response.json()
+    download_url = str(payload.get("url") or "")
+    if not download_url.startswith("https://"):
+        raise RuntimeError("خدمة تنزيل YouTube لم تعد رابطاً آمناً.")
+    expected_size = int(payload.get("file_size") or 0)
+    if expected_size > MAX_REMOTE_DOWNLOAD_BYTES:
+        raise RuntimeError(
+            f"حجم الملف من الرابط أكبر من الحد المسموح ({MAX_REMOTE_DOWNLOAD_BYTES // (1024 * 1024)} MB)."
+        )
+
+    filename = str(payload.get("filename") or "downloaded.mp4")
+    suffix = safe_suffix(filename)
+    if suffix == ".bin":
+        suffix = ".mp4"
+    partial_path = workdir / "downloaded-tunelio.part"
+    out_path = workdir / f"downloaded-tunelio{suffix}"
+    downloaded = 0
+    try:
+        with requests.get(download_url, stream=True, timeout=TUNELIO_TIMEOUT) as download:
+            download.raise_for_status()
+            try:
+                content_length = int(download.headers.get("Content-Length") or "0")
+            except ValueError:
+                content_length = 0
+            if content_length > MAX_REMOTE_DOWNLOAD_BYTES:
+                raise RuntimeError(
+                    f"حجم الملف من الرابط أكبر من الحد المسموح ({MAX_REMOTE_DOWNLOAD_BYTES // (1024 * 1024)} MB)."
+                )
+            with partial_path.open("wb") as target:
+                for chunk in download.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    downloaded += len(chunk)
+                    if downloaded > MAX_REMOTE_DOWNLOAD_BYTES:
+                        raise RuntimeError(
+                            f"حجم الملف من الرابط أكبر من الحد المسموح ({MAX_REMOTE_DOWNLOAD_BYTES // (1024 * 1024)} MB)."
+                        )
+                    target.write(chunk)
+    except Exception:
+        partial_path.unlink(missing_ok=True)
+        raise
+
+    if downloaded <= 0:
+        partial_path.unlink(missing_ok=True)
+        raise RuntimeError("خدمة تنزيل YouTube أعادت ملفاً فارغاً.")
+    partial_path.replace(out_path)
+    return out_path, str(payload.get("title") or filename or "مقطع من YouTube")
+
+
 def try_cobalt_download(job_id: str, url: str, workdir: Path, api_url: str, index: int) -> Optional[Path]:
     context = ssl._create_unverified_context()
     payload = {
@@ -939,6 +1010,23 @@ def download_link(job_id: str, url: str) -> Path:
     info: Optional[Dict[str, Any]] = None
 
     is_yt = is_youtube_url(url)
+
+    if is_yt and TUNELIO_API_KEY and requests is not None:
+        try:
+            media_path, title = download_via_tunelio(job_id, url, workdir)
+            update_job(
+                job_id,
+                original_path=str(media_path),
+                title=title,
+                status="extracting",
+                stage="استخراج الصوت",
+                progress=24,
+                message="اكتمل التحميل السريع. نستخرج المسار الصوتي الآن.",
+            )
+            return media_path
+        except Exception as exc:
+            download_errors.append(f"Tunelio: {exc}")
+            update_job(job_id, message="تعذر خادم التنزيل الأساسي. نجرب المسارات الاحتياطية.")
 
     if is_yt and yt_dlp is not None and not HOSTED_SPACE:
         for clients in youtube_download_clients(url):
