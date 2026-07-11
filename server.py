@@ -173,6 +173,11 @@ ASSETS_DIR.mkdir(exist_ok=True)
 STORAGE.mkdir(exist_ok=True)
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
+
+class LinkDurationLimitError(RuntimeError):
+    pass
+
+
 app = FastAPI(title="HalalStream Server", version="0.3.0")
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
@@ -1164,6 +1169,8 @@ def download_link(job_id: str, url: str) -> Path:
                 message="اكتمل التحميل المجاني. نستخرج المسار الصوتي الآن.",
             )
             return media_path
+        except LinkDurationLimitError:
+            raise
         except Exception as exc:
             download_errors.append(f"NoAdsDL: {exc}")
             update_job(job_id, message="تعذر الخادم المجاني الأساسي. نجرب خادماً مجتمعياً.")
@@ -1180,6 +1187,8 @@ def download_link(job_id: str, url: str) -> Path:
                 message="اكتمل التحميل عبر خادم مجاني. نستخرج المسار الصوتي الآن.",
             )
             return media_path
+        except LinkDurationLimitError:
+            raise
         except Exception as exc:
             download_errors.append(f"Cobalt: {exc}")
             update_job(job_id, message="تعذرت الخوادم المجانية. نجرب المسار الاحتياطي.")
@@ -1197,6 +1206,8 @@ def download_link(job_id: str, url: str) -> Path:
                 message="اكتمل التحميل السريع. نستخرج المسار الصوتي الآن.",
             )
             return media_path
+        except LinkDurationLimitError:
+            raise
         except Exception as exc:
             download_errors.append(f"Tunelio: {exc}")
             update_job(job_id, message="تعذر خادم التنزيل الاحتياطي. نجرب التنزيل المباشر إن توفر.")
@@ -1297,7 +1308,7 @@ def enforce_link_duration_seconds(duration_seconds: Optional[float], source_labe
         return
     if duration_seconds <= MAX_LINK_DURATION_SECONDS:
         return
-    raise RuntimeError(
+    raise LinkDurationLimitError(
         f"مدة {source_label} {format_duration_ar(duration_seconds)}، والحد الأقصى للروابط هو "
         f"{format_duration_ar(MAX_LINK_DURATION_SECONDS)} حتى لا يتراكم طابور التنقية. "
         "اختر مقطعاً أقصر أو قصّ الرابط ثم أعد المحاولة."
