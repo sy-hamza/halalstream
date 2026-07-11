@@ -66,6 +66,8 @@ let jobStartedAt = null;
 let lastLogMessage = "";
 let serverReady = false;
 let linkDownloadsReliable = true;
+let purificationEnabled = true;
+let purificationPausedMessage = "بسبب الضغط اليوم تم إيقاف التنقية مؤقتاً. يرجى مراجعتنا في وقت لاحق.";
 let healthPollTimer = null;
 const welcomeNoticeKey = "halalstream_welcome_notice_seen_v2";
 
@@ -125,6 +127,11 @@ mediaForm.addEventListener("submit", async (event) => {
     showError("خادم المعالجة غير متصل حالياً. يرجى فتح السيرفر وإيقاظه بالضغط على الرابط أسفل لوحة الانتظار.");
     return;
   }
+  const selectedPurifyMode = document.querySelector('input[name="purify_mode"]:checked')?.value || "purify";
+  if (!purificationEnabled && selectedPurifyMode !== "direct") {
+    showError(purificationPausedMessage);
+    return;
+  }
 
   try {
     setBusy(true);
@@ -160,6 +167,10 @@ decisionPurifyButton.addEventListener("click", startPurify);
 async function startPurify() {
   if (!currentJobId) {
     showError("لا توجد مهمة جاهزة لإزالة المعازف.");
+    return;
+  }
+  if (!purificationEnabled) {
+    showError(purificationPausedMessage);
     return;
   }
 
@@ -331,11 +342,13 @@ async function checkHealth() {
     const purificationReady = Boolean(health.demucs || health.modal_purify_enabled);
     serverReady = Boolean(health.ok && health.ffmpeg && health.yt_dlp && purificationReady);
     linkDownloadsReliable = health.link_downloads_reliable !== false;
+    purificationEnabled = health.purification_enabled !== false;
+    purificationPausedMessage = health.purification_disabled_message || purificationPausedMessage;
     hostingNote.hidden = linkDownloadsReliable;
     serverPill.classList.toggle("is-ready", serverReady);
     serverPill.classList.toggle("is-error", !serverReady);
-    engineMode.textContent = health.modal_purify_enabled ? "تنقية Modal" : "تنقية صارمة";
-    engineJobs.textContent = health.modal_purify_enabled ? "GPU عند الطلب" : (linkDownloadsReliable ? "آمن" : "رفع الملفات أفضل");
+    engineMode.textContent = purificationEnabled ? (health.modal_purify_enabled ? "تنقية Modal" : "تنقية صارمة") : "التنقية متوقفة";
+    engineJobs.textContent = purificationEnabled ? (health.modal_purify_enabled ? "GPU عند الطلب" : (linkDownloadsReliable ? "آمن" : "رفع الملفات أفضل")) : "التحميل المباشر متاح";
 
     if (serverReady) {
       if (healthPollTimer) {

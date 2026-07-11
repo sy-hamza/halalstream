@@ -49,6 +49,7 @@ ROOT = Path(__file__).resolve().parent
 STORAGE = Path(os.getenv("HALALSTREAM_STORAGE_DIR", ROOT / "storage")).resolve()
 JOBS_DIR = STORAGE / "jobs"
 USAGE_LOG = STORAGE / "usage.jsonl"
+CONTROL_FILE = STORAGE / "control.json"
 TOOLS_DIR = ROOT / "tools"
 ASSETS_DIR = ROOT / "assets"
 DEMUCS_MODEL = os.getenv("HALALSTREAM_DEMUCS_MODEL", "htdemucs")
@@ -128,6 +129,10 @@ MODAL_PURIFY_SECRET = os.getenv("HALALSTREAM_MODAL_SECRET", "").strip()
 MODAL_PURIFY_TIMEOUT = max(300, int(os.getenv("HALALSTREAM_MODAL_PURIFY_TIMEOUT", "1800")))
 ADMIN_USER = os.getenv("HALALSTREAM_ADMIN_USER", "").strip()
 ADMIN_PASSWORD = os.getenv("HALALSTREAM_ADMIN_PASSWORD", "").strip()
+PURIFICATION_DISABLED_MESSAGE = os.getenv(
+    "HALALSTREAM_PURIFICATION_DISABLED_MESSAGE",
+    "بسبب الضغط اليوم تم إيقاف التنقية مؤقتاً. التحميل المباشر ما زال متاحاً للملفات التي تعرف أنها خالية من المعازف. يرجى مراجعتنا في وقت لاحق.",
+).strip()
 MODAL_ESTIMATED_USD_PER_SECOND = max(
     0.0,
     float(os.getenv("HALALSTREAM_MODAL_ESTIMATED_USD_PER_SECOND", "0.00033")),
@@ -213,6 +218,7 @@ async def add_security_headers(request: Request, call_next):
 jobs: Dict[str, Dict[str, Any]] = {}
 jobs_lock = threading.Lock()
 usage_lock = threading.Lock()
+control_lock = threading.Lock()
 processing_semaphore = threading.BoundedSemaphore(MAX_ACTIVE_PROCESSING_JOBS)
 queue_lock = threading.Lock()
 waiting_processing_jobs: list[str] = []
@@ -256,6 +262,19 @@ def admin_usage(credentials: Optional[HTTPBasicCredentials] = Depends(admin_secu
     return HTMLResponse(render_usage_dashboard(events), headers={"Cache-Control": "no-store"})
 
 
+@app.post("/admin/usage/purification", response_class=HTMLResponse)
+def admin_set_purification(
+    enabled: str = Form(...),
+    token: str = Form(""),
+    credentials: Optional[HTTPBasicCredentials] = Depends(admin_security),
+) -> HTMLResponse:
+    require_admin(credentials)
+    require_admin_action_token(token)
+    set_purification_enabled(enabled.strip() == "1")
+    events = read_usage_events()
+    return HTMLResponse(render_usage_dashboard(events), headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
     with queue_lock:
@@ -292,6 +311,8 @@ def health() -> Dict[str, Any]:
         "strict_residual_music_absolute_threshold": STRICT_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD,
         "voice_enhance_enabled": VOICE_ENHANCE_ENABLED,
         "voice_restore_profile": "raw_roformer_v1",
+        "purification_enabled": purification_enabled(),
+        "purification_disabled_message": purification_disabled_message(),
         "modal_purify_enabled": bool(MODAL_PURIFY_URL and MODAL_PURIFY_SECRET and requests is not None),
         "modal_purify_url_configured": bool(MODAL_PURIFY_URL),
         "noadsdl_download_enabled": bool(NOADSDL_ENABLED and requests is not None),
@@ -317,6 +338,8 @@ def create_link_job(payload: LinkJobRequest) -> Dict[str, str]:
             status_code=400,
             detail="الاستضافة الحالية لا تنزّل روابط YouTube بثبات. نزّل الملف على جهازك ثم ارفعه من تبويب ملف.",
         )
+    if payload.purify_mode != "direct":
+        ensure_purification_enabled()
     job = create_job(
         "link",
         source_url=str(payload.url),
@@ -335,6 +358,8 @@ async def create_upload_job(
 ) -> Dict[str, str]:
     if not file.filename:
         raise HTTPException(status_code=400, detail="لم يصل اسم الملف إلى الخادم.")
+    if purify_mode != "direct":
+        ensure_purification_enabled()
 
     job = create_job(
         "upload",
@@ -405,6 +430,7 @@ def purify(job_id: str) -> Dict[str, str]:
         raise HTTPException(status_code=404, detail="لم يتم العثور على المهمة.")
     if job["status"] not in {"needs_consent", "failed_after_detection"}:
         raise HTTPException(status_code=409, detail="لا يمكن بدء إزالة المعازف في الحالة الحالية.")
+    ensure_purification_enabled()
 
     update_job(job_id, status="purifying", stage="إزالة المعازف", progress=82, message="نبدأ إزالة المعازف ونجهز نسخة منقّاة الآن.")
     start_worker(purify_job, job_id)
@@ -418,6 +444,8 @@ def retry(job_id: str) -> Dict[str, str]:
         raise HTTPException(status_code=404, detail="لم يتم العثور على المهمة.")
     if job["status"] != "failed":
         raise HTTPException(status_code=409, detail="إعادة المحاولة متاحة فقط بعد فشل المعالجة.")
+    if job.get("purify_mode", "purify") != "direct":
+        ensure_purification_enabled()
 
     clear_generated_outputs(job_id)
     update_job(
@@ -541,6 +569,7 @@ def process_job(job_id: str) -> None:
             complete_direct_job(job_id, original)
             return
 
+        ensure_purification_enabled_for_worker()
         original = prepare_original(job_id, job)
 
         if modal_purify_available():
@@ -660,6 +689,7 @@ def process_job_with_modal(job_id: str, original: Path) -> None:
     if requests is None:
         raise RuntimeError("مكتبة requests غير مثبتة، ولا يمكن الاتصال بعامل Modal.")
 
+    ensure_purification_enabled_for_worker()
     modal_audio = prepare_modal_audio(job_id, original)
     update_job(
         job_id,
@@ -2547,6 +2577,77 @@ def require_admin(credentials: Optional[HTTPBasicCredentials]) -> None:
         )
 
 
+def admin_action_token() -> str:
+    secret = ADMIN_PASSWORD or "halalstream"
+    return hmac.new(secret.encode("utf-8"), b"purification-control", "sha256").hexdigest()
+
+
+def require_admin_action_token(token: str) -> None:
+    if not hmac.compare_digest(token, admin_action_token()):
+        raise HTTPException(status_code=403, detail="انتهت صلاحية صفحة الإدارة. حدّث الصفحة ثم حاول مرة أخرى.")
+
+
+def default_control_state() -> Dict[str, Any]:
+    return {
+        "purification_enabled": True,
+        "purification_disabled_message": PURIFICATION_DISABLED_MESSAGE,
+        "updated_at": None,
+    }
+
+
+def read_control_state() -> Dict[str, Any]:
+    state = default_control_state()
+    with control_lock:
+        if not CONTROL_FILE.exists():
+            return state
+        try:
+            loaded = json.loads(CONTROL_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return state
+    if isinstance(loaded, dict):
+        state.update(loaded)
+    state["purification_enabled"] = bool(state.get("purification_enabled", True))
+    message = str(state.get("purification_disabled_message") or "").strip()
+    state["purification_disabled_message"] = message or PURIFICATION_DISABLED_MESSAGE
+    return state
+
+
+def write_control_state(state: Dict[str, Any]) -> None:
+    current = default_control_state()
+    current.update(state)
+    current["updated_at"] = datetime.now(timezone.utc).isoformat()
+    with control_lock:
+        CONTROL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CONTROL_FILE.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def purification_enabled() -> bool:
+    return bool(read_control_state().get("purification_enabled", True))
+
+
+def purification_disabled_message() -> str:
+    return str(read_control_state().get("purification_disabled_message") or PURIFICATION_DISABLED_MESSAGE)
+
+
+def set_purification_enabled(enabled: bool) -> None:
+    write_control_state(
+        {
+            "purification_enabled": bool(enabled),
+            "purification_disabled_message": PURIFICATION_DISABLED_MESSAGE,
+        }
+    )
+
+
+def ensure_purification_enabled() -> None:
+    if not purification_enabled():
+        raise HTTPException(status_code=503, detail=purification_disabled_message())
+
+
+def ensure_purification_enabled_for_worker() -> None:
+    if not purification_enabled():
+        raise RuntimeError(purification_disabled_message())
+
+
 def append_usage_event(event: Dict[str, Any]) -> None:
     event = dict(event)
     event.setdefault("created_at", datetime.now(timezone.utc).isoformat())
@@ -2666,6 +2767,31 @@ def render_usage_dashboard(events: list[Dict[str, Any]]) -> str:
     rows = "\n".join(render_usage_row(event) for event in recent) or (
         '<tr><td colspan="7">لا يوجد استهلاك مسجل بعد.</td></tr>'
     )
+    control_state = read_control_state()
+    is_purification_enabled = bool(control_state.get("purification_enabled", True))
+    disabled_message = str(control_state.get("purification_disabled_message") or PURIFICATION_DISABLED_MESSAGE)
+    control_class = "" if is_purification_enabled else " is-off"
+    control_status = "التنقية مفعلة الآن" if is_purification_enabled else "التنقية متوقفة مؤقتاً"
+    control_detail = (
+        "أي طلب تنقية جديد سيستطيع الوصول إلى Modal. التحميل المباشر يبقى متاحاً أيضاً."
+        if is_purification_enabled
+        else disabled_message
+    )
+    control_note = (
+        "عند الإيقاف، لن تبدأ أي تنقية جديدة ولن يتم إرسال ملفات جديدة إلى Modal. الوظائف التي بدأت فعلاً قد تكمل عملها."
+    )
+    action_value = "0" if is_purification_enabled else "1"
+    action_label = "إيقاف التنقية مؤقتاً" if is_purification_enabled else "تشغيل التنقية"
+    action_class = "stop-button" if is_purification_enabled else "start-button"
+    updated_raw = control_state.get("updated_at")
+    updated_text = "لم يتم تغييره بعد"
+    if updated_raw:
+        try:
+            updated_text = datetime.fromisoformat(str(updated_raw).replace("Z", "+00:00")).astimezone(tz).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+        except ValueError:
+            updated_text = str(updated_raw)
     card_html = "\n".join(
         f"""
         <section class="card">
@@ -2690,6 +2816,17 @@ def render_usage_dashboard(events: list[Dict[str, Any]]) -> str:
     main {{ width: min(1120px, calc(100% - 24px)); margin: 0 auto; padding: 28px 0 42px; }}
     h1 {{ margin: 0 0 8px; font-size: clamp(1.8rem, 5vw, 3rem); }}
     p {{ color: #526662; line-height: 1.8; }}
+    .control {{ display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: center; margin: 22px 0 24px; padding: 18px; border: 1px solid rgba(8, 124, 114, .18); border-radius: 8px; background: #fff; box-shadow: 0 10px 28px rgba(8, 124, 114, .08); }}
+    .control.is-off {{ border-color: rgba(170, 65, 77, .28); background: #fff7f8; }}
+    .control strong {{ display: block; margin-bottom: 6px; font-size: 1.25rem; color: #087c72; }}
+    .control.is-off strong {{ color: #aa414d; }}
+    .control p {{ margin: 0; }}
+    .control small {{ display: block; margin-top: 8px; color: #687a76; }}
+    .control form {{ margin: 0; }}
+    .control button {{ min-width: 190px; border: 0; border-radius: 8px; padding: 13px 16px; color: #fff; font: inherit; font-weight: 800; cursor: pointer; }}
+    .control button:hover {{ filter: brightness(.96); }}
+    .stop-button {{ background: #aa414d; }}
+    .start-button {{ background: #087c72; }}
     .cards {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 24px 0; }}
     .card {{ display: grid; gap: 6px; padding: 16px; border: 1px solid rgba(8, 124, 114, .14); border-radius: 8px; background: #fff; }}
     .card span {{ color: #b68134; font-weight: 800; }}
@@ -2702,7 +2839,7 @@ def render_usage_dashboard(events: list[Dict[str, Any]]) -> str:
     .ok {{ color: #087c72; font-weight: 800; }}
     .bad {{ color: #aa414d; font-weight: 800; }}
     code {{ direction: ltr; unicode-bidi: bidi-override; font-size: .85rem; }}
-    @media (max-width: 800px) {{ .cards {{ grid-template-columns: 1fr 1fr; }} table {{ font-size: .86rem; }} }}
+    @media (max-width: 800px) {{ .control {{ grid-template-columns: 1fr; }} .control button {{ width: 100%; }} .cards {{ grid-template-columns: 1fr 1fr; }} table {{ font-size: .86rem; }} }}
     @media (max-width: 520px) {{ .cards {{ grid-template-columns: 1fr; }} th:nth-child(2), td:nth-child(2) {{ display: none; }} }}
   </style>
 </head>
@@ -2713,6 +2850,18 @@ def render_usage_dashboard(events: list[Dict[str, Any]]) -> str:
       هذه لوحة إدارية خاصة. الأرقام تقديرية من وقت نداء Modal الفعلي، وليست فاتورة Modal الرسمية.
       السعر المستخدم حالياً للتقدير: ${rate_per_minute:.3f} لكل دقيقة معالجة.
     </p>
+    <section class="control{control_class}">
+      <div>
+        <strong>{html.escape(control_status)}</strong>
+        <p>{html.escape(control_detail)}</p>
+        <small>{html.escape(control_note)} آخر تغيير: {html.escape(updated_text)}</small>
+      </div>
+      <form method="post" action="/admin/usage/purification">
+        <input type="hidden" name="enabled" value="{action_value}" />
+        <input type="hidden" name="token" value="{admin_action_token()}" />
+        <button class="{action_class}" type="submit">{html.escape(action_label)}</button>
+      </form>
+    </section>
     <div class="cards">{card_html}</div>
     <table>
       <thead>
