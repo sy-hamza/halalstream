@@ -658,6 +658,7 @@ def prepare_original(job_id: str, job: Dict[str, Any], for_direct: bool = False)
         validate_link_media(job_id, original, require_audio=not for_direct)
     else:
         original = Path(job["original_path"])
+        validate_downloaded_media(original, require_audio=not for_direct)
         update_job(
             job_id,
             status="downloading" if for_direct else "extracting",
@@ -3083,6 +3084,8 @@ def friendly_error(message: str) -> str:
         return "خادم التحميل أعاد صورة ثابتة بدل الفيديو. جرّب رابط الريل المباشر أو ارفع الملف من جهازك."
     if "لا يحتوي على مسار صوتي" in message:
         return "الملف المحمّل لا يحتوي على مسار صوتي. لا يمكن فحصه أو تنقيته من المعازف."
+    if "Invalid data found when processing input" in message:
+        return "الملف الذي وصل غير صالح كصوت أو فيديو قابل للمعالجة. جرّب رابطاً آخر أو ارفع الملف من جهازك."
     if "فشل محرك عزل الصوت" in message:
         if "longer segment" in message or "Maximum segment" in message:
             return "تعذر تشغيل محرك العزل بسبب إعداد داخلي غير مناسب. تم ضبطه الآن؛ اضغط إعادة المحاولة."
