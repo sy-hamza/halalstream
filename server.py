@@ -4,6 +4,7 @@ import json
 import math
 import os
 import base64
+import re
 import shutil
 import ssl
 import subprocess
@@ -72,6 +73,7 @@ MAX_REMOTE_DOWNLOAD_BYTES = max(
     1 * 1024 * 1024,
     int(os.getenv("HALALSTREAM_MAX_REMOTE_DOWNLOAD_BYTES", str(500 * 1024 * 1024))),
 )
+MAX_LINK_DURATION_SECONDS = max(0, int(os.getenv("HALALSTREAM_MAX_LINK_DURATION_SECONDS", "600")))
 COBALT_PARALLELISM = max(1, int(os.getenv("HALALSTREAM_COBALT_PARALLELISM", "1")))
 COBALT_API_TIMEOUT = max(3, int(os.getenv("HALALSTREAM_COBALT_API_TIMEOUT", "8")))
 COBALT_DOWNLOAD_TIMEOUT = max(10, int(os.getenv("HALALSTREAM_COBALT_DOWNLOAD_TIMEOUT", "25")))
@@ -254,6 +256,7 @@ def health() -> Dict[str, Any]:
         "job_ttl_hours": JOB_TTL_HOURS,
         "max_upload_mb": round(MAX_UPLOAD_BYTES / (1024 * 1024), 1),
         "max_remote_download_mb": round(MAX_REMOTE_DOWNLOAD_BYTES / (1024 * 1024), 1),
+        "max_link_duration_seconds": MAX_LINK_DURATION_SECONDS,
         "cobalt_parallelism": COBALT_PARALLELISM,
         "verify_purified_output": VERIFY_PURIFIED_OUTPUT,
         "residual_music_ratio_threshold": RESIDUAL_MUSIC_RATIO_THRESHOLD,
@@ -485,6 +488,7 @@ def create_job(
         "purified_path": None,
         "purified_audio_path": None,
         "clean_audio_path": None,
+        "duration_seconds": None,
         "queue_position": 0,
         "queue_length": 0,
         "estimated_wait_seconds": 0,
@@ -584,6 +588,7 @@ def prepare_original(job_id: str, job: Dict[str, Any], for_direct: bool = False)
             )
         else:
             original = download_link(job_id, job["source_url"])
+        enforce_link_file_duration(job_id, original)
     else:
         original = Path(job["original_path"])
         update_job(
@@ -903,6 +908,10 @@ def download_via_noadsdl(job_id: str, url: str, workdir: Path) -> tuple[Path, st
     info = info_response.json()
     if not info.get("success"):
         raise RuntimeError(str(info.get("error") or "تعذر استخراج بيانات المقطع."))
+    duration_seconds = coerce_duration_seconds(info.get("duration"))
+    if duration_seconds is not None:
+        update_job(job_id, duration_seconds=round(duration_seconds, 2))
+    enforce_link_duration_seconds(duration_seconds, "الرابط")
 
     selected_format_id = "720"
     selected_height = -1
@@ -1244,6 +1253,80 @@ def youtube_download_clients(url: str) -> tuple[tuple[str, ...], ...]:
 def is_youtube_url(url: str) -> bool:
     lowered = url.lower()
     return "youtube.com" in lowered or "youtu.be" in lowered
+
+
+def coerce_duration_seconds(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+        return seconds if math.isfinite(seconds) and seconds > 0 else None
+
+    text = str(value).strip()
+    if not text:
+        return None
+    if ":" in text:
+        try:
+            parts = [float(part) for part in text.split(":")]
+        except ValueError:
+            parts = []
+        if parts:
+            seconds = 0.0
+            for part in parts:
+                seconds = seconds * 60 + part
+            return seconds if math.isfinite(seconds) and seconds > 0 else None
+
+    match = re.search(r"\d+(?:\.\d+)?", text)
+    if not match:
+        return None
+    seconds = float(match.group(0))
+    return seconds if math.isfinite(seconds) and seconds > 0 else None
+
+
+def format_duration_ar(seconds: float) -> str:
+    total_seconds = max(0, int(round(seconds)))
+    minutes, rest = divmod(total_seconds, 60)
+    if minutes < 60:
+        return f"{minutes}:{rest:02d} دقيقة"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}:{minutes:02d}:{rest:02d} ساعة"
+
+
+def enforce_link_duration_seconds(duration_seconds: Optional[float], source_label: str = "الرابط") -> None:
+    if MAX_LINK_DURATION_SECONDS <= 0 or duration_seconds is None:
+        return
+    if duration_seconds <= MAX_LINK_DURATION_SECONDS:
+        return
+    raise RuntimeError(
+        f"مدة {source_label} {format_duration_ar(duration_seconds)}، والحد الأقصى للروابط هو "
+        f"{format_duration_ar(MAX_LINK_DURATION_SECONDS)} حتى لا يتراكم طابور التنقية. "
+        "اختر مقطعاً أقصر أو قصّ الرابط ثم أعد المحاولة."
+    )
+
+
+def probe_media_duration_seconds(path: Path) -> Optional[float]:
+    ffmpeg = require_ffmpeg()
+    result = subprocess.run(
+        [ffmpeg, "-hide_banner", "-i", str(path)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    details = "\n".join(part for part in [result.stdout, result.stderr] if part)
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", details)
+    if not match:
+        return None
+    hours = int(match.group(1))
+    minutes = int(match.group(2))
+    seconds = float(match.group(3))
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def enforce_link_file_duration(job_id: str, media_path: Path) -> None:
+    duration_seconds = probe_media_duration_seconds(media_path)
+    if duration_seconds is not None:
+        update_job(job_id, duration_seconds=round(duration_seconds, 2))
+    enforce_link_duration_seconds(duration_seconds, "الرابط")
 
 
 def build_ydl_options(workdir: Path, job_id: str, youtube_clients: tuple[str, ...]) -> Dict[str, Any]:
@@ -2438,6 +2521,7 @@ def load_persisted_jobs() -> None:
                 continue
             data.setdefault("purified_audio_path", None)
             data.setdefault("clean_audio_path", None)
+            data.setdefault("duration_seconds", None)
             data.setdefault("residual_music_ratio", None)
             data.setdefault("purification_mode", None)
             data.setdefault("queue_position", 0)
