@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700;800&display=swap"
     rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=safety-ui-v1" />
+  <link rel="stylesheet" href="styles.css?v=safety-ui-v2" />
 </head>
 
 <body>
@@ -29,6 +29,24 @@
       <span></span>
     </div>
   </div>
+
+  <aside class="welcome-notice" id="welcome-notice" role="dialog" aria-modal="true" aria-labelledby="welcome-title"
+    aria-describedby="welcome-copy" hidden>
+    <div class="welcome-notice-panel">
+      <p class="notice-kicker">تذكير قبل الاستخدام</p>
+      <h2 id="welcome-title">نسأل الله أن يكون هذا العمل عوناً على الطاعة</h2>
+      <p id="welcome-copy">
+        HalalStream أداة تعينك على تقليل المعازف قدر الإمكان، وليست فتوى ولا ضماناً مطلقاً لسلامة كل ملف. قال النبي
+        صلى الله عليه وسلم: «لَيَكُونَنَّ مِنْ أُمَّتِي أَقْوَامٌ يَسْتَحِلُّونَ ... وَالْمَعَازِفَ»
+        <a href="https://sunnah.com/bukhari:5590" target="_blank" rel="noopener">صحيح البخاري 5590</a>.
+      </p>
+      <p>
+        اختر التنقية عند وجود المعازف، ولا تستخدم التحميل المباشر إلا لما يغلب على ظنك أنه خال منها. نسأل الله أن
+        يبارك لك في المحتوى الطيب.
+      </p>
+      <button class="primary-button" id="welcome-close-button" type="button">فهمت، متابعة</button>
+    </div>
+  </aside>
 
   <aside class="decision-overlay" id="decision-overlay" role="alertdialog" aria-labelledby="decision-title"
     aria-describedby="decision-copy" hidden>
@@ -320,7 +338,7 @@
     <span>للتواصل عند حصول مشاكل</span>
   </a>
 
-  <script src="app.js?v=safety-ui-v1" defer></script>
+  <script src="app.js?v=safety-ui-v2" defer></script>
 </body>
 
 </html>

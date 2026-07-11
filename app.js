@@ -12,6 +12,8 @@ const recordButton = document.querySelector("#record-button");
 const recordStatus = document.querySelector("#record-status");
 const recordPreview = document.querySelector("#record-preview");
 const submitButton = document.querySelector("#submit-button");
+const welcomeNotice = document.querySelector("#welcome-notice");
+const welcomeCloseButton = document.querySelector("#welcome-close-button");
 const purifyButton = document.querySelector("#purify-button");
 const decisionOverlay = document.querySelector("#decision-overlay");
 const decisionPurifyButton = document.querySelector("#decision-purify-button");
@@ -65,6 +67,7 @@ let lastLogMessage = "";
 let serverReady = false;
 let linkDownloadsReliable = true;
 let healthPollTimer = null;
+const welcomeNoticeKey = "halalstream_welcome_notice_seen_v2";
 
 const waitingNotes = [
   "يمكنك ترك الصفحة مفتوحة والرجوع لاحقاً؛ خادم المعالجة سيكمل العمل ما دام السيرفر شغالاً.",
@@ -89,6 +92,8 @@ const statusToStep = {
   failed: "decision"
 };
 const terminalStatuses = new Set(["clean", "direct", "needs_consent", "complete", "failed"]);
+
+setupWelcomeNotice();
 
 tabs.forEach((tab) => {
   tab.addEventListener("click", () => setMode(tab.dataset.mode));
@@ -198,6 +203,46 @@ retryButton.addEventListener("click", async () => {
     showError(error.message || "تعذرت إعادة المحاولة.");
   }
 });
+
+function setupWelcomeNotice() {
+  if (!welcomeNotice || !welcomeCloseButton) {
+    return;
+  }
+
+  let alreadySeen = false;
+  try {
+    alreadySeen = sessionStorage.getItem(welcomeNoticeKey) === "1";
+  } catch (error) {
+    alreadySeen = false;
+  }
+
+  if (!alreadySeen) {
+    welcomeNotice.hidden = false;
+    document.body.classList.add("has-welcome-notice");
+    window.setTimeout(() => welcomeCloseButton.focus(), 60);
+  }
+
+  welcomeCloseButton.addEventListener("click", closeWelcomeNotice);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !welcomeNotice.hidden) {
+      closeWelcomeNotice();
+    }
+  });
+}
+
+function closeWelcomeNotice() {
+  if (!welcomeNotice) {
+    return;
+  }
+
+  welcomeNotice.hidden = true;
+  document.body.classList.remove("has-welcome-notice");
+  try {
+    sessionStorage.setItem(welcomeNoticeKey, "1");
+  } catch (error) {
+    // Ignored if sessionStorage is unavailable
+  }
+}
 
 copyHelperCommand.addEventListener("click", async () => {
   if (!helperCommand.value) return;
