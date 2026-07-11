@@ -4,6 +4,8 @@ import json
 import math
 import os
 import base64
+import hmac
+import html
 import re
 import shutil
 import ssl
@@ -16,12 +18,14 @@ import urllib.request
 import uuid
 import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urljoin, urlparse
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, HttpUrl
 
@@ -44,6 +48,7 @@ except Exception:  # pragma: no cover - optional external worker client
 ROOT = Path(__file__).resolve().parent
 STORAGE = Path(os.getenv("HALALSTREAM_STORAGE_DIR", ROOT / "storage")).resolve()
 JOBS_DIR = STORAGE / "jobs"
+USAGE_LOG = STORAGE / "usage.jsonl"
 TOOLS_DIR = ROOT / "tools"
 ASSETS_DIR = ROOT / "assets"
 DEMUCS_MODEL = os.getenv("HALALSTREAM_DEMUCS_MODEL", "htdemucs")
@@ -121,6 +126,13 @@ VOICE_ENHANCE_SPEECH_FILTER = os.getenv(
 MODAL_PURIFY_URL = os.getenv("HALALSTREAM_MODAL_PURIFY_URL", "").strip()
 MODAL_PURIFY_SECRET = os.getenv("HALALSTREAM_MODAL_SECRET", "").strip()
 MODAL_PURIFY_TIMEOUT = max(300, int(os.getenv("HALALSTREAM_MODAL_PURIFY_TIMEOUT", "1800")))
+ADMIN_USER = os.getenv("HALALSTREAM_ADMIN_USER", "").strip()
+ADMIN_PASSWORD = os.getenv("HALALSTREAM_ADMIN_PASSWORD", "").strip()
+MODAL_ESTIMATED_USD_PER_SECOND = max(
+    0.0,
+    float(os.getenv("HALALSTREAM_MODAL_ESTIMATED_USD_PER_SECOND", "0.00033")),
+)
+USAGE_TZ_OFFSET_HOURS = float(os.getenv("HALALSTREAM_USAGE_TZ_OFFSET_HOURS", "3"))
 TUNELIO_API_KEY = os.getenv("HALALSTREAM_TUNELIO_API_KEY", "").strip()
 TUNELIO_API_URL = os.getenv("HALALSTREAM_TUNELIO_API_URL", "https://tunelio.dev").rstrip("/")
 TUNELIO_TIMEOUT = max(30, int(os.getenv("HALALSTREAM_TUNELIO_TIMEOUT", "180")))
@@ -200,10 +212,12 @@ async def add_security_headers(request: Request, call_next):
 
 jobs: Dict[str, Dict[str, Any]] = {}
 jobs_lock = threading.Lock()
+usage_lock = threading.Lock()
 processing_semaphore = threading.BoundedSemaphore(MAX_ACTIVE_PROCESSING_JOBS)
 queue_lock = threading.Lock()
 waiting_processing_jobs: list[str] = []
 active_processing_jobs: set[str] = set()
+admin_security = HTTPBasic(auto_error=False)
 
 
 class LinkJobRequest(BaseModel):
@@ -233,6 +247,13 @@ def styles() -> FileResponse:
         media_type="text/css",
         headers={"Cache-Control": "no-store"},
     )
+
+
+@app.get("/admin/usage", response_class=HTMLResponse)
+def admin_usage(credentials: Optional[HTTPBasicCredentials] = Depends(admin_security)) -> HTMLResponse:
+    require_admin(credentials)
+    events = read_usage_events()
+    return HTMLResponse(render_usage_dashboard(events), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/health")
@@ -652,6 +673,9 @@ def process_job_with_modal(job_id: str, original: Path) -> None:
     )
     last_error = None
     for attempt in range(1, 4):
+        attempt_started = time.time()
+        response_status = None
+        result_status = None
         try:
             update_job(
                 job_id,
@@ -671,12 +695,33 @@ def process_job_with_modal(job_id: str, original: Path) -> None:
                     files={"file": (modal_audio.name, file_obj, "audio/flac")},
                     timeout=MODAL_PURIFY_TIMEOUT,
                 )
+            response_status = response.status_code
             if response.status_code != 200:
                 raise RuntimeError(f"فشل عامل Modal: HTTP {response.status_code}\n{response.text[:1200]}")
             payload = response.json()
+            result_status = str(payload.get("status") or "complete")
+            record_modal_usage(
+                job_id,
+                attempt,
+                attempt_started,
+                time.time(),
+                True,
+                response_status=response_status,
+                result_status=result_status,
+            )
             break
         except Exception as exc:
             last_error = exc
+            record_modal_usage(
+                job_id,
+                attempt,
+                attempt_started,
+                time.time(),
+                False,
+                response_status=response_status,
+                result_status=result_status,
+                error=str(exc),
+            )
             if attempt < 3:
                 time.sleep(2 * attempt)
     else:
@@ -2484,6 +2529,231 @@ def persist_job(job_id: str) -> None:
         return
     path = job_dir(job_id) / "job.json"
     path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def require_admin(credentials: Optional[HTTPBasicCredentials]) -> None:
+    if not ADMIN_USER or not ADMIN_PASSWORD:
+        raise HTTPException(status_code=503, detail="لوحة الإدارة غير مفعلة بعد.")
+    valid = bool(
+        credentials
+        and hmac.compare_digest(credentials.username, ADMIN_USER)
+        and hmac.compare_digest(credentials.password, ADMIN_PASSWORD)
+    )
+    if not valid:
+        raise HTTPException(
+            status_code=401,
+            detail="تسجيل الدخول مطلوب.",
+            headers={"WWW-Authenticate": 'Basic realm="HalalStream usage"'},
+        )
+
+
+def append_usage_event(event: Dict[str, Any]) -> None:
+    event = dict(event)
+    event.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    with usage_lock:
+        USAGE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with USAGE_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def read_usage_events() -> list[Dict[str, Any]]:
+    if not USAGE_LOG.exists():
+        return []
+    events: list[Dict[str, Any]] = []
+    with usage_lock:
+        lines = USAGE_LOG.read_text(encoding="utf-8").splitlines()
+    for line in lines[-5000:]:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def record_modal_usage(
+    job_id: str,
+    attempt: int,
+    started_at: float,
+    ended_at: float,
+    success: bool,
+    response_status: Optional[int] = None,
+    result_status: Optional[str] = None,
+    error: Optional[str] = None,
+) -> None:
+    try:
+        elapsed_seconds = max(0.0, ended_at - started_at)
+        estimated_cost = elapsed_seconds * MODAL_ESTIMATED_USD_PER_SECOND
+        job = get_internal_job(job_id) or {}
+        input_mb = None
+        if job.get("original_path"):
+            try:
+                original_path = Path(str(job.get("original_path")))
+                if original_path.exists():
+                    input_mb = round(original_path.stat().st_size / (1024 * 1024), 2)
+            except OSError:
+                input_mb = None
+        event = {
+            "type": "modal_purify",
+            "job_id": job_id,
+            "attempt": attempt,
+            "success": success,
+            "response_status": response_status,
+            "result_status": result_status,
+            "elapsed_seconds": round(elapsed_seconds, 3),
+            "estimated_cost_usd": round(estimated_cost, 6),
+            "source_type": job.get("source_type"),
+            "duration_seconds": job.get("duration_seconds"),
+            "input_mb": input_mb,
+            "error": str(error)[:400] if error else None,
+        }
+        append_usage_event(event)
+        update_job(
+            job_id,
+            modal_elapsed_seconds=round(elapsed_seconds, 2),
+            modal_estimated_cost_usd=round(estimated_cost, 4),
+        )
+    except Exception as exc:
+        print(f"Failed to record Modal usage for {job_id}: {exc}")
+
+
+def usage_timezone() -> timezone:
+    return timezone(timedelta(hours=USAGE_TZ_OFFSET_HOURS))
+
+
+def event_datetime(event: Dict[str, Any]) -> datetime:
+    created_at = str(event.get("created_at") or "")
+    try:
+        parsed = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except ValueError:
+        parsed = datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(usage_timezone())
+
+
+def usage_stats(events: list[Dict[str, Any]], start: datetime, end: datetime) -> Dict[str, Any]:
+    filtered = [event for event in events if start <= event_datetime(event) < end]
+    success_events = [event for event in filtered if event.get("success")]
+    seconds = sum(float(event.get("elapsed_seconds") or 0.0) for event in filtered)
+    cost = sum(float(event.get("estimated_cost_usd") or 0.0) for event in filtered)
+    return {
+        "calls": len(filtered),
+        "successful_jobs": len(success_events),
+        "seconds": seconds,
+        "minutes": seconds / 60,
+        "cost": cost,
+    }
+
+
+def render_usage_dashboard(events: list[Dict[str, Any]]) -> str:
+    tz = usage_timezone()
+    now = datetime.now(tz)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_start = today_start + timedelta(days=1)
+    yesterday_start = today_start - timedelta(days=1)
+    month_start = today_start.replace(day=1)
+    next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+
+    cards = [
+        ("اليوم", usage_stats(events, today_start, tomorrow_start)),
+        ("أمس", usage_stats(events, yesterday_start, today_start)),
+        ("هذا الشهر", usage_stats(events, month_start, next_month)),
+        ("كل السجل", usage_stats(events, datetime.min.replace(tzinfo=tz), datetime.max.replace(tzinfo=tz))),
+    ]
+    recent = list(reversed(events[-80:]))
+    rows = "\n".join(render_usage_row(event) for event in recent) or (
+        '<tr><td colspan="7">لا يوجد استهلاك مسجل بعد.</td></tr>'
+    )
+    card_html = "\n".join(
+        f"""
+        <section class="card">
+          <span>{html.escape(title)}</span>
+          <strong>{stats["successful_jobs"]}</strong>
+          <small>عمليات ناجحة</small>
+          <b>{stats["minutes"]:.1f} دقيقة</b>
+          <em>${stats["cost"]:.2f}</em>
+        </section>
+        """
+        for title, stats in cards
+    )
+    rate_per_minute = MODAL_ESTIMATED_USD_PER_SECOND * 60
+    return f"""<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>استهلاك HalalStream</title>
+  <style>
+    body {{ margin: 0; font-family: Tahoma, Arial, sans-serif; color: #14211f; background: #eef8f5; }}
+    main {{ width: min(1120px, calc(100% - 24px)); margin: 0 auto; padding: 28px 0 42px; }}
+    h1 {{ margin: 0 0 8px; font-size: clamp(1.8rem, 5vw, 3rem); }}
+    p {{ color: #526662; line-height: 1.8; }}
+    .cards {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 24px 0; }}
+    .card {{ display: grid; gap: 6px; padding: 16px; border: 1px solid rgba(8, 124, 114, .14); border-radius: 8px; background: #fff; }}
+    .card span {{ color: #b68134; font-weight: 800; }}
+    .card strong {{ font-size: 2rem; }}
+    .card small {{ color: #526662; }}
+    .card b, .card em {{ font-style: normal; color: #087c72; font-weight: 800; }}
+    table {{ width: 100%; border-collapse: collapse; overflow: hidden; border-radius: 8px; background: #fff; }}
+    th, td {{ padding: 10px; border-bottom: 1px solid rgba(18, 32, 30, .1); text-align: right; vertical-align: top; }}
+    th {{ color: #07554f; background: #e8f8f3; }}
+    .ok {{ color: #087c72; font-weight: 800; }}
+    .bad {{ color: #aa414d; font-weight: 800; }}
+    code {{ direction: ltr; unicode-bidi: bidi-override; font-size: .85rem; }}
+    @media (max-width: 800px) {{ .cards {{ grid-template-columns: 1fr 1fr; }} table {{ font-size: .86rem; }} }}
+    @media (max-width: 520px) {{ .cards {{ grid-template-columns: 1fr; }} th:nth-child(2), td:nth-child(2) {{ display: none; }} }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>استهلاك التنقية</h1>
+    <p>
+      هذه لوحة إدارية خاصة. الأرقام تقديرية من وقت نداء Modal الفعلي، وليست فاتورة Modal الرسمية.
+      السعر المستخدم حالياً للتقدير: ${rate_per_minute:.3f} لكل دقيقة معالجة.
+    </p>
+    <div class="cards">{card_html}</div>
+    <table>
+      <thead>
+        <tr>
+          <th>الوقت</th>
+          <th>المهمة</th>
+          <th>النتيجة</th>
+          <th>المدة</th>
+          <th>تكلفة تقديرية</th>
+          <th>مدة المقطع</th>
+          <th>محاولة</th>
+        </tr>
+      </thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </main>
+</body>
+</html>"""
+
+
+def render_usage_row(event: Dict[str, Any]) -> str:
+    created = event_datetime(event).strftime("%Y-%m-%d %H:%M")
+    success = bool(event.get("success"))
+    status_class = "ok" if success else "bad"
+    status = "نجحت" if success else "فشلت"
+    if event.get("result_status"):
+        status += f" / {html.escape(str(event.get('result_status')))}"
+    seconds = float(event.get("elapsed_seconds") or 0.0)
+    duration = event.get("duration_seconds")
+    duration_text = format_duration_ar(float(duration)) if duration else "-"
+    return f"""
+      <tr>
+        <td>{html.escape(created)}</td>
+        <td><code>{html.escape(str(event.get("job_id") or ""))}</code></td>
+        <td class="{status_class}">{status}</td>
+        <td>{seconds / 60:.1f} دقيقة</td>
+        <td>${float(event.get("estimated_cost_usd") or 0.0):.2f}</td>
+        <td>{html.escape(duration_text)}</td>
+        <td>{html.escape(str(event.get("attempt") or ""))}</td>
+      </tr>
+    """
 
 
 def fail_job(job_id: str, exc: Exception) -> None:
