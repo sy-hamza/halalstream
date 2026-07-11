@@ -83,6 +83,9 @@ MAX_LINK_DURATION_SECONDS = max(0, int(os.getenv("HALALSTREAM_MAX_LINK_DURATION_
 COBALT_PARALLELISM = max(1, int(os.getenv("HALALSTREAM_COBALT_PARALLELISM", "1")))
 COBALT_API_TIMEOUT = max(3, int(os.getenv("HALALSTREAM_COBALT_API_TIMEOUT", "8")))
 COBALT_DOWNLOAD_TIMEOUT = max(10, int(os.getenv("HALALSTREAM_COBALT_DOWNLOAD_TIMEOUT", "25")))
+IMAGE_ONLY_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif", ".heic", ".heif"}
+VIDEO_SUFFIXES = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi"}
+KNOWN_MEDIA_SUFFIXES = VIDEO_SUFFIXES | {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac"}
 VERIFY_PURIFIED_OUTPUT = os.getenv("HALALSTREAM_VERIFY_PURIFIED_OUTPUT", "1").strip().lower() in {"1", "true", "yes"}
 RESIDUAL_MUSIC_RATIO_THRESHOLD = float(os.getenv("HALALSTREAM_RESIDUAL_MUSIC_RATIO_THRESHOLD", "0.12"))
 RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD = float(os.getenv("HALALSTREAM_RESIDUAL_MUSIC_ABSOLUTE_THRESHOLD", "0.01"))
@@ -192,6 +195,10 @@ JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class LinkDurationLimitError(RuntimeError):
+    pass
+
+
+class DownloadedMediaValidationError(RuntimeError):
     pass
 
 
@@ -634,16 +641,21 @@ def prepare_original(job_id: str, job: Dict[str, Any], for_direct: bool = False)
         existing_original = job.get("original_path")
         if existing_original and Path(existing_original).exists():
             original = Path(existing_original)
-            update_job(
-                job_id,
-                status="downloading" if for_direct else "extracting",
-                stage="تجهيز التحميل" if for_direct else "استخراج الصوت",
-                progress=80 if for_direct else 24,
-                message="نستخدم الملف الموجود ونجهزه للتحميل المباشر." if for_direct else "نستخدم الملف الموجود ونستخرج الصوت من جديد.",
-            )
+            try:
+                validate_downloaded_media(original, require_audio=not for_direct)
+                update_job(
+                    job_id,
+                    status="downloading" if for_direct else "extracting",
+                    stage="تجهيز التحميل" if for_direct else "استخراج الصوت",
+                    progress=80 if for_direct else 24,
+                    message="نستخدم الملف الموجود ونجهزه للتحميل المباشر." if for_direct else "نستخدم الملف الموجود ونستخرج الصوت من جديد.",
+                )
+            except DownloadedMediaValidationError:
+                original.unlink(missing_ok=True)
+                original = download_link(job_id, job["source_url"], require_audio=not for_direct)
         else:
-            original = download_link(job_id, job["source_url"])
-        enforce_link_file_duration(job_id, original)
+            original = download_link(job_id, job["source_url"], require_audio=not for_direct)
+        validate_link_media(job_id, original, require_audio=not for_direct)
     else:
         original = Path(job["original_path"])
         update_job(
@@ -923,7 +935,7 @@ def purify_job(job_id: str) -> None:
         fail_job(job_id, exc)
 
 
-def download_via_cobalt(job_id: str, url: str, workdir: Path) -> Path:
+def download_via_cobalt(job_id: str, url: str, workdir: Path, require_audio: bool = True) -> Path:
     errors: list[str] = []
     indexed_apis = list(enumerate(COBALT_FALLBACK_APIS))
     for start in range(0, len(indexed_apis), COBALT_PARALLELISM):
@@ -932,7 +944,7 @@ def download_via_cobalt(job_id: str, url: str, workdir: Path) -> Path:
         update_job(job_id, message=f"نبحث عن أسرع خادم تنزيل متاح: {labels}")
         executor = ThreadPoolExecutor(max_workers=len(batch))
         futures = {
-            executor.submit(try_cobalt_download, job_id, url, workdir, api_url, index): api_url
+            executor.submit(try_cobalt_download, job_id, url, workdir, api_url, index, require_audio): api_url
             for index, api_url in batch
         }
         try:
@@ -958,7 +970,7 @@ def download_via_cobalt(job_id: str, url: str, workdir: Path) -> Path:
     raise RuntimeError("فشلت جميع محاولات التنزيل المباشرة وعبر الخوادم المساندة.")
 
 
-def download_via_noadsdl(job_id: str, url: str, workdir: Path) -> tuple[Path, str]:
+def download_via_noadsdl(job_id: str, url: str, workdir: Path, require_audio: bool = True) -> tuple[Path, str]:
     if requests is None or not NOADSDL_ENABLED:
         raise RuntimeError("خادم التنزيل المجاني غير مفعّل.")
 
@@ -1081,10 +1093,15 @@ def download_via_noadsdl(job_id: str, url: str, workdir: Path) -> tuple[Path, st
         partial_path.unlink(missing_ok=True)
         raise RuntimeError("أعاد خادم التنزيل المجاني ملفاً فارغاً.")
     partial_path.replace(out_path)
+    try:
+        validate_downloaded_media(out_path, require_audio=require_audio)
+    except Exception:
+        out_path.unlink(missing_ok=True)
+        raise
     return out_path, str(info.get("title") or "مقطع من YouTube")
 
 
-def download_via_tunelio(job_id: str, url: str, workdir: Path) -> tuple[Path, str]:
+def download_via_tunelio(job_id: str, url: str, workdir: Path, require_audio: bool = True) -> tuple[Path, str]:
     if requests is None or not TUNELIO_API_KEY:
         raise RuntimeError("خدمة تنزيل YouTube الأساسية غير مفعّلة.")
 
@@ -1148,10 +1165,22 @@ def download_via_tunelio(job_id: str, url: str, workdir: Path) -> tuple[Path, st
         partial_path.unlink(missing_ok=True)
         raise RuntimeError("خدمة تنزيل YouTube أعادت ملفاً فارغاً.")
     partial_path.replace(out_path)
+    try:
+        validate_downloaded_media(out_path, require_audio=require_audio)
+    except Exception:
+        out_path.unlink(missing_ok=True)
+        raise
     return out_path, str(payload.get("title") or filename or "مقطع من YouTube")
 
 
-def try_cobalt_download(job_id: str, url: str, workdir: Path, api_url: str, index: int) -> Optional[Path]:
+def try_cobalt_download(
+    job_id: str,
+    url: str,
+    workdir: Path,
+    api_url: str,
+    index: int,
+    require_audio: bool = True,
+) -> Optional[Path]:
     context = ssl._create_unverified_context()
     payload = {
         "url": url,
@@ -1171,54 +1200,113 @@ def try_cobalt_download(job_id: str, url: str, workdir: Path, api_url: str, inde
     with urllib.request.urlopen(req, context=context, timeout=COBALT_API_TIMEOUT) as response:
         res = json.loads(response.read().decode("utf-8"))
 
-    status = res.get("status")
-    download_url = None
-    filename = None
-    if status in ("tunnel", "redirect"):
-        download_url = res.get("url")
-        filename = res.get("filename")
-    elif status == "picker":
-        picker_items = res.get("picker", [])
-        if picker_items:
-            download_url = picker_items[0].get("url")
-            filename = picker_items[0].get("filename")
+    last_error = None
+    for candidate_index, candidate in enumerate(cobalt_download_candidates(res)):
+        download_url = candidate.get("url")
+        if not download_url:
+            continue
 
-    if not download_url:
-        return None
-
-    suffix = safe_suffix(filename or "downloaded.mp4")
-    partial_path = workdir / f"downloaded-{index}.part"
-    out_path = workdir / f"downloaded-{index}{suffix}"
-    dl_req = urllib.request.Request(download_url, headers={"User-Agent": COBALT_USER_AGENT})
-    with urllib.request.urlopen(dl_req, context=context, timeout=COBALT_DOWNLOAD_TIMEOUT) as dl_res:
+        filename = candidate.get("filename") or "downloaded.mp4"
+        suffix = safe_suffix(filename)
+        partial_path = workdir / f"downloaded-{index}-{candidate_index}.part"
+        out_path = workdir / f"downloaded-{index}-{candidate_index}{suffix}"
         try:
-            content_length = int(dl_res.headers.get("Content-Length") or "0")
-        except ValueError:
-            content_length = 0
-        if content_length > MAX_REMOTE_DOWNLOAD_BYTES:
-            raise RuntimeError(
-                f"حجم الملف من الرابط أكبر من الحد المسموح ({MAX_REMOTE_DOWNLOAD_BYTES // (1024 * 1024)} MB)."
-            )
-        downloaded = 0
-        with partial_path.open("wb") as f:
-            while True:
-                chunk = dl_res.read(1024 * 1024)
-                if not chunk:
-                    break
-                downloaded += len(chunk)
-                if downloaded > MAX_REMOTE_DOWNLOAD_BYTES:
-                    partial_path.unlink(missing_ok=True)
+            dl_req = urllib.request.Request(download_url, headers={"User-Agent": COBALT_USER_AGENT})
+            with urllib.request.urlopen(dl_req, context=context, timeout=COBALT_DOWNLOAD_TIMEOUT) as dl_res:
+                try:
+                    content_length = int(dl_res.headers.get("Content-Length") or "0")
+                except ValueError:
+                    content_length = 0
+                if content_length > MAX_REMOTE_DOWNLOAD_BYTES:
                     raise RuntimeError(
                         f"حجم الملف من الرابط أكبر من الحد المسموح ({MAX_REMOTE_DOWNLOAD_BYTES // (1024 * 1024)} MB)."
                     )
-                f.write(chunk)
-    if partial_path.exists() and partial_path.stat().st_size > 0:
-        partial_path.replace(out_path)
-        return out_path
+                downloaded = 0
+                with partial_path.open("wb") as f:
+                    while True:
+                        chunk = dl_res.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        downloaded += len(chunk)
+                        if downloaded > MAX_REMOTE_DOWNLOAD_BYTES:
+                            partial_path.unlink(missing_ok=True)
+                            raise RuntimeError(
+                                f"حجم الملف من الرابط أكبر من الحد المسموح ({MAX_REMOTE_DOWNLOAD_BYTES // (1024 * 1024)} MB)."
+                            )
+                        f.write(chunk)
+            if partial_path.exists() and partial_path.stat().st_size > 0:
+                partial_path.replace(out_path)
+                validate_downloaded_media(out_path, require_audio=require_audio)
+                return out_path
+        except Exception as exc:
+            last_error = exc
+            partial_path.unlink(missing_ok=True)
+            out_path.unlink(missing_ok=True)
+            continue
+    if last_error:
+        raise last_error
     return None
 
 
-def download_link(job_id: str, url: str) -> Path:
+def cobalt_download_candidates(payload: Dict[str, Any]) -> list[Dict[str, str]]:
+    status = payload.get("status")
+    candidates: list[Dict[str, str]] = []
+    if status in ("tunnel", "redirect"):
+        candidates.append(
+            {
+                "url": str(payload.get("url") or ""),
+                "filename": str(payload.get("filename") or "downloaded.mp4"),
+                "type": str(payload.get("type") or ""),
+            }
+        )
+    elif status == "picker":
+        for item in payload.get("picker") or []:
+            if not isinstance(item, dict):
+                continue
+            candidates.append(
+                {
+                    "url": str(item.get("url") or ""),
+                    "filename": str(item.get("filename") or item.get("name") or "downloaded.mp4"),
+                    "type": str(item.get("type") or item.get("kind") or ""),
+                }
+            )
+    return sorted(
+        [candidate for candidate in candidates if candidate.get("url")],
+        key=cobalt_candidate_rank,
+    )
+
+
+def cobalt_candidate_rank(candidate: Dict[str, str]) -> tuple[int, str]:
+    filename = candidate.get("filename") or ""
+    suffix = safe_suffix(filename)
+    media_type = (candidate.get("type") or "").lower()
+    url_path = urlparse(candidate.get("url") or "").path.lower()
+    url_suffix = Path(url_path).suffix.lower()
+    text = f"{media_type} {filename} {url_path}".lower()
+    if "video" in media_type or suffix in VIDEO_SUFFIXES or url_suffix in VIDEO_SUFFIXES:
+        return (0, filename)
+    if "audio" in media_type or suffix in KNOWN_MEDIA_SUFFIXES or url_suffix in KNOWN_MEDIA_SUFFIXES:
+        return (1, filename)
+    if "photo" in text or "image" in text or suffix in IMAGE_ONLY_SUFFIXES or url_suffix in IMAGE_ONLY_SUFFIXES:
+        return (9, filename)
+    return (3, filename)
+
+
+def download_via_ytdlp(job_id: str, url: str, workdir: Path, require_audio: bool = True) -> tuple[Path, str]:
+    if yt_dlp is None:
+        raise RuntimeError("yt-dlp غير متاح على الخادم.")
+    cleanup_partial_downloads(workdir)
+    update_job(job_id, message="نحاول تنزيل الرابط مباشرة عبر yt-dlp.")
+    with yt_dlp.YoutubeDL(build_ydl_options(workdir, job_id, youtube_download_clients(url)[0])) as ydl:
+        info = ydl.extract_info(url, download=True)
+    media_path = find_downloaded_media(workdir)
+    if not media_path:
+        raise RuntimeError("اكتمل التنزيل المباشر لكن لم نستطع تحديد ملف الوسائط الناتج.")
+    validate_downloaded_media(media_path, require_audio=require_audio)
+    return media_path, str(info.get("title") or media_path.name or "مقطع من رابط")
+
+
+def download_link(job_id: str, url: str, require_audio: bool = True) -> Path:
     # Clean tracking query parameters for safer downloading, especially for Instagram/TikTok/Shorts
     if "instagram.com" in url.lower() or "tiktok.com" in url.lower() or "/shorts/" in url.lower() or "youtu.be" in url.lower():
         if "?" in url:
@@ -1233,7 +1321,7 @@ def download_link(job_id: str, url: str) -> Path:
 
     if is_yt:
         try:
-            media_path, title = download_via_noadsdl(job_id, url, workdir)
+            media_path, title = download_via_noadsdl(job_id, url, workdir, require_audio=require_audio)
             update_job(
                 job_id,
                 original_path=str(media_path),
@@ -1251,7 +1339,7 @@ def download_link(job_id: str, url: str) -> Path:
             update_job(job_id, message="تعذر الخادم المجاني الأساسي. نجرب خادماً مجتمعياً.")
 
         try:
-            media_path = download_via_cobalt(job_id, url, workdir)
+            media_path = download_via_cobalt(job_id, url, workdir, require_audio=require_audio)
             update_job(
                 job_id,
                 original_path=str(media_path),
@@ -1270,7 +1358,7 @@ def download_link(job_id: str, url: str) -> Path:
 
     if is_yt and ENABLE_TUNELIO_FALLBACK and TUNELIO_API_KEY and requests is not None:
         try:
-            media_path, title = download_via_tunelio(job_id, url, workdir)
+            media_path, title = download_via_tunelio(job_id, url, workdir, require_audio=require_audio)
             update_job(
                 job_id,
                 original_path=str(media_path),
@@ -1295,6 +1383,9 @@ def download_link(job_id: str, url: str) -> Path:
             try:
                 with yt_dlp.YoutubeDL(build_ydl_options(workdir, job_id, clients)) as ydl:
                     info = ydl.extract_info(url, download=True)
+                media_path = find_downloaded_media(workdir)
+                if media_path:
+                    validate_downloaded_media(media_path, require_audio=require_audio)
                 break
             except Exception as exc:
                 download_errors.append(f"{label}: {exc}")
@@ -1312,11 +1403,16 @@ def download_link(job_id: str, url: str) -> Path:
 
         update_job(job_id, message="رابط خارجي. نحاول التنزيل عبر الخوادم المساندة...")
         try:
-            media_path = download_via_cobalt(job_id, url, workdir)
+            media_path = download_via_cobalt(job_id, url, workdir, require_audio=require_audio)
             title = media_path.name
         except Exception as exc:
-            all_errors = download_errors + [str(exc)]
-            raise RuntimeError(youtube_download_error(all_errors))
+            download_errors.append(f"Cobalt: {exc}")
+            update_job(job_id, message="الخادم المساند لم يعد ملفاً صالحاً. نجرب yt-dlp مباشرة.")
+            try:
+                media_path, title = download_via_ytdlp(job_id, url, workdir, require_audio=require_audio)
+            except Exception as ytdlp_exc:
+                all_errors = download_errors + [f"yt-dlp: {ytdlp_exc}"]
+                raise RuntimeError(external_download_error(all_errors))
 
     update_job(
         job_id,
@@ -1390,7 +1486,7 @@ def enforce_link_duration_seconds(duration_seconds: Optional[float], source_labe
     )
 
 
-def probe_media_duration_seconds(path: Path) -> Optional[float]:
+def ffmpeg_media_details(path: Path) -> str:
     ffmpeg = require_ffmpeg()
     result = subprocess.run(
         [ffmpeg, "-hide_banner", "-i", str(path)],
@@ -1398,7 +1494,10 @@ def probe_media_duration_seconds(path: Path) -> Optional[float]:
         text=True,
         timeout=20,
     )
-    details = "\n".join(part for part in [result.stdout, result.stderr] if part)
+    return "\n".join(part for part in [result.stdout, result.stderr] if part)
+
+
+def parse_media_duration_seconds(details: str) -> Optional[float]:
     match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", details)
     if not match:
         return None
@@ -1408,10 +1507,52 @@ def probe_media_duration_seconds(path: Path) -> Optional[float]:
     return hours * 3600 + minutes * 60 + seconds
 
 
+def probe_media_duration_seconds(path: Path) -> Optional[float]:
+    return parse_media_duration_seconds(ffmpeg_media_details(path))
+
+
 def enforce_link_file_duration(job_id: str, media_path: Path) -> None:
     duration_seconds = probe_media_duration_seconds(media_path)
     if duration_seconds is not None:
         update_job(job_id, duration_seconds=round(duration_seconds, 2))
+    enforce_link_duration_seconds(duration_seconds, "الرابط")
+
+
+def validate_downloaded_media(media_path: Path, require_audio: bool = True) -> Dict[str, Any]:
+    suffix = media_path.suffix.lower()
+    if suffix in IMAGE_ONLY_SUFFIXES:
+        raise DownloadedMediaValidationError(
+            "خادم التنزيل أعاد صورة ثابتة بدل الفيديو. جرّب رابط الريل المباشر أو ارفع الملف من جهازك."
+        )
+    details = ffmpeg_media_details(media_path)
+    has_audio = bool(re.search(r"Stream #\d+:\d+.*Audio:", details))
+    has_video = bool(re.search(r"Stream #\d+:\d+.*Video:", details))
+    duration_seconds = parse_media_duration_seconds(details)
+    lowered_details = details.lower()
+    image_input = "input #0, image2" in lowered_details or "image2," in lowered_details
+
+    if image_input or (has_video and not has_audio and suffix not in VIDEO_SUFFIXES and duration_seconds and duration_seconds < 1):
+        raise DownloadedMediaValidationError(
+            "خادم التنزيل أعاد صورة أو معاينة ثابتة بدل الفيديو. جرّب رابط الريل المباشر أو ارفع الملف من جهازك."
+        )
+    if not has_audio and not has_video:
+        raise DownloadedMediaValidationError("الملف المحمّل لا يحتوي على صوت أو فيديو صالح للمعالجة.")
+    if require_audio and not has_audio:
+        raise DownloadedMediaValidationError(
+            "الملف المحمّل لا يحتوي على مسار صوتي. لا يمكن فحصه أو تنقيته من المعازف."
+        )
+    return {
+        "has_audio": has_audio,
+        "has_video": has_video,
+        "duration_seconds": duration_seconds,
+    }
+
+
+def validate_link_media(job_id: str, media_path: Path, require_audio: bool = True) -> None:
+    probe = validate_downloaded_media(media_path, require_audio=require_audio)
+    duration_seconds = probe.get("duration_seconds")
+    if duration_seconds is not None:
+        update_job(job_id, duration_seconds=round(float(duration_seconds), 2))
     enforce_link_duration_seconds(duration_seconds, "الرابط")
 
 
@@ -1493,6 +1634,21 @@ def youtube_download_error(errors: list[str]) -> str:
     if "HTTP Error 403" in last_error or "Forbidden" in last_error:
         return "منع YouTube تنزيل هذا الرابط مؤقتاً من خادم الاستضافة. جرّب رابطاً آخر أو ارفع الملف من جهازك."
     return "تعذر تنزيل الرابط بعد عدة محاولات. جرّب رابطاً آخر أو ارفع الملف من جهازك."
+
+
+def external_download_error(errors: list[str]) -> str:
+    combined = "\n".join(errors[-4:])
+    lowered = combined.lower()
+    if "صورة" in combined or "image" in lowered or ".jpg" in lowered or ".jpeg" in lowered:
+        return (
+            "تعذر تنزيل الفيديو من هذا الرابط لأن خوادم التحميل أعادت صورة الغلاف أو معاينة ثابتة بدل الريل. "
+            "جرّب رابط الريل المباشر من زر المشاركة في Instagram، أو ارفع الملف من جهازك."
+        )
+    if "login" in lowered or "sign in" in lowered or "private" in lowered or "cookies" in lowered:
+        return "هذا الرابط يبدو خاصاً أو يحتاج تسجيل دخول. جرّب رابطاً عاماً أو ارفع الملف من جهازك."
+    if "no video" in lowered or "لا يحتوي على مسار صوتي" in combined:
+        return "الملف الذي وصل من الرابط لا يحتوي على صوت صالح للفحص. جرّب رابطاً آخر أو ارفع الملف من جهازك."
+    return "تعذر تنزيل هذا الرابط بعد عدة محاولات. جرّب رابطاً آخر أو ارفع الملف من جهازك."
 
 
 def yt_progress_hook(job_id: str, data: Dict[str, Any]) -> None:
@@ -2921,6 +3077,12 @@ def fail_job(job_id: str, exc: Exception) -> None:
 def friendly_error(message: str) -> str:
     if "Requested format is not available" in message:
         return "تعذر العثور على صيغة قابلة للتحميل لهذا الرابط. حدّث yt-dlp أو جرّب رابطاً آخر."
+    if "Output file #0 does not contain any stream" in message or "does not contain any stream" in message:
+        return "الملف الذي وصل من الرابط لا يحتوي على صوت صالح للمعالجة. غالباً أعاد خادم التحميل صورة أو معاينة بدل الفيديو."
+    if "Input #0, image2" in message or "خادم التنزيل أعاد صورة" in message:
+        return "خادم التحميل أعاد صورة ثابتة بدل الفيديو. جرّب رابط الريل المباشر أو ارفع الملف من جهازك."
+    if "لا يحتوي على مسار صوتي" in message:
+        return "الملف المحمّل لا يحتوي على مسار صوتي. لا يمكن فحصه أو تنقيته من المعازف."
     if "فشل محرك عزل الصوت" in message:
         if "longer segment" in message or "Maximum segment" in message:
             return "تعذر تشغيل محرك العزل بسبب إعداد داخلي غير مناسب. تم ضبطه الآن؛ اضغط إعادة المحاولة."
