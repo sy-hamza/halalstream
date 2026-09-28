@@ -1,0 +1,64 @@
+name: Keep processing server awake
+
+# Best effort on free hardware, not an uptime guarantee.
+# GitHub may disable schedules after 60 days without repository activity;
+# re-enable this workflow from the Actions page if that happens.
+
+on:
+  schedule:
+    # Twice a day, away from the busy start of the hour (UTC).
+    - cron: '23 5,17 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/keep-space-awake.yml'
+
+# A public HTTP health check needs no repository access or secrets.
+permissions: {}
+
+concurrency:
+  group: keep-processing-server-awake
+  cancel-in-progress: false
+
+jobs:
+  health-check:
+    # Standard runners are free for this public repository.
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Wake the CPU server and verify its health
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import time
+          import urllib.error
+          import urllib.request
+
+          # GET only: this endpoint does not create jobs, process media,
+          # contact Modal, or reserve purification credits.
+          url = "https://7haydar-halalstream.hf.space/api/health"
+          for attempt in range(1, 6):
+              try:
+                  request = urllib.request.Request(url, headers={
+                      "User-Agent": "HalalStream-HealthCheck/1.0",
+                      "Accept": "application/json",
+                      "Cache-Control": "no-cache",
+                  })
+                  with urllib.request.urlopen(request, timeout=60) as response:
+                      if response.status != 200:
+                          raise ValueError("Health endpoint did not return HTTP 200")
+                      payload = json.load(response)
+                  if payload.get("ok") is not True:
+                      raise ValueError("Server is not ready yet")
+                  if not payload.get("ffmpeg") or not payload.get("yt_dlp"):
+                      raise ValueError("Required download tools are unavailable")
+                  print("CPU server is ready. No media jobs or Modal calls were made.")
+                  break
+              except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
+                  print(f"Health check {attempt}/5: {type(error).__name__}")
+                  if attempt == 5:
+                      raise SystemExit("Server did not become ready within the retry window.")
+                  time.sleep(20)
+          PY
