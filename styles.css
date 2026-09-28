@@ -1445,3 +1445,28 @@ audio {
     box-shadow: 0 0 0 8px rgba(255, 152, 0, 0);
   }
 }
+
+.notification-settings, .history-panel {
+  border: 1px solid rgba(8, 124, 114, .18);
+  border-radius: 12px;
+  padding: 20px;
+  background: rgba(255, 255, 255, .88);
+}
+.notification-settings { margin-top: 22px; }
+.notification-settings p, .history-panel p, .result-expiry { color: #526662; line-height: 1.8; font-size: .9rem; }
+.notification-settings button { width: 100%; }
+.history-panel { margin: 28px 0 50px; }
+.history-header, .history-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.history-header h2 { margin: 0; }
+.history-list { list-style: none; padding: 0; margin: 16px 0 0; display: grid; gap: 10px; }
+.history-item { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px; border: 1px solid rgba(8, 124, 114, .13); border-radius: 8px; }
+.history-item div { min-width: 0; }
+.history-item strong { display: block; overflow-wrap: anywhere; }
+.history-item small { display: block; color: #526662; line-height: 1.8; }
+.history-item button { flex-shrink: 0; }
+.history-item.is-expired { opacity: .7; }
+.result-expiry { padding: 10px 14px; background: #e8f8f3; border-radius: 8px; }
+@media (max-width: 560px) {
+  .history-header, .history-item { align-items: stretch; flex-direction: column; }
+  .history-actions button { flex: 1; }
+}
