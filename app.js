@@ -60,9 +60,11 @@ let recordingStream = null;
 let currentJobId = null;
 let pollTimer = null;
 let pollFailures = 0;
-let pollInFlight = false;
+let pollingJobId = null;
+let pollController = null;
 let elapsedTimer = null;
-let jobStartedAt = null;
+let elapsedBaseSeconds = 0;
+let elapsedSyncedAt = 0;
 let lastLogMessage = "";
 let serverReady = false;
 let linkDownloadsReliable = true;
@@ -72,7 +74,7 @@ let healthPollTimer = null;
 const welcomeNoticeKey = "halalstream_welcome_notice_seen_v2";
 
 const waitingNotes = [
-  "يمكنك ترك الصفحة مفتوحة والرجوع لاحقاً؛ خادم المعالجة سيكمل العمل ما دام السيرفر شغالاً.",
+  "يمكنك مغادرة الصفحة والرجوع لاحقاً؛ المعالجة تستمر والمدة تتوقف عند انتهاء المهمة على الخادم.",
   "استغل وقت الانتظار بالاستغفار: أستغفر الله وأتوب إليه.",
   "قال تعالى: {وَمَنْ يَتَّقِ اللَّهَ يَجْعَلْ لَهُ مَخْرَجًا}.",
   "قال النبي صلى الله عليه وسلم: «ليكونن من أمتي أقوام يستحلون ... والمعازف» صحيح البخاري 5590.",
@@ -134,6 +136,8 @@ mediaForm.addEventListener("submit", async (event) => {
   }
 
   try {
+    stopPolling();
+    currentJobId = null;
     setBusy(true);
     hideResultCards();
     resetLog("بدأنا مهمة جديدة. نسأل الله التيسير والبركة.");
@@ -156,6 +160,7 @@ mediaForm.addEventListener("submit", async (event) => {
     }
     startPolling(jobId);
   } catch (error) {
+    stopElapsedTimer();
     setBusy(false);
     showError(error.message || "تعذر إرسال المقطع إلى خادم المعالجة.");
   }
@@ -186,6 +191,7 @@ async function startPurify() {
     }
     startPolling(currentJobId);
   } catch (error) {
+    stopElapsedTimer();
     setBusy(false);
     showError(error.message || "تعذر بدء إزالة المعازف.");
   }
@@ -210,6 +216,7 @@ retryButton.addEventListener("click", async () => {
     }
     startPolling(currentJobId);
   } catch (error) {
+    stopElapsedTimer();
     setBusy(false);
     showError(error.message || "تعذرت إعادة المحاولة.");
   }
@@ -411,24 +418,18 @@ async function checkHealth() {
 }
 
 async function restoreLatestJob() {
+  if (currentJobId || submitButton.disabled) {
+    return;
+  }
   try {
     const savedJobId = localStorage.getItem("halalstream_job_id");
     if (!savedJobId) {
       return;
     }
-    const response = await fetch(`${API_BASE}/api/jobs/${savedJobId}`, { cache: "no-store" });
-    if (!response.ok) {
-      return;
-    }
-    const job = await response.json();
-    currentJobId = job.id;
-    renderJob(job);
+    currentJobId = savedJobId;
+    setBusy(true);
     appendLog("استعدنا آخر مهمة محفوظة لجهازك.");
-    if (!terminalStatuses.has(job.status)) {
-      setBusy(true);
-      startElapsedTimer(job.created_at ? Number(job.created_at) * 1000 : undefined);
-      startPolling(job.id);
-    }
+    startPolling(savedJobId);
   } catch (error) {
     // لا نزعج المستخدم إذا لم تكن هناك مهمة سابقة.
   }
@@ -492,20 +493,66 @@ async function createJob() {
 }
 
 function startPolling(jobId) {
-  window.clearInterval(pollTimer);
+  stopPolling();
   pollFailures = 0;
-  pollInFlight = false;
-  pollTimer = window.setInterval(() => pollJob(jobId), 1300);
+  pollingJobId = jobId;
   pollJob(jobId);
 }
 
+function pausePolling() {
+  window.clearTimeout(pollTimer);
+  pollTimer = null;
+  if (pollController) {
+    const controller = pollController;
+    pollController = null;
+    controller.abort();
+  }
+}
+
+function stopPolling() {
+  pollingJobId = null;
+  pausePolling();
+}
+
+function pauseJobTracking() {
+  pausePolling();
+  stopElapsedTimer();
+}
+
+function resumeJobTracking() {
+  if (!document.hidden && pollingJobId) {
+    window.clearTimeout(pollTimer);
+    pollTimer = null;
+    pollJob(pollingJobId);
+  }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    pauseJobTracking();
+  } else {
+    resumeJobTracking();
+  }
+});
+window.addEventListener("pagehide", pauseJobTracking);
+window.addEventListener("pageshow", resumeJobTracking);
+window.addEventListener("online", () => {
+  pauseJobTracking();
+  resumeJobTracking();
+});
+
 async function pollJob(jobId) {
-  if (pollInFlight) {
+  if (document.hidden || pollController || pollingJobId !== jobId) {
     return;
   }
-  pollInFlight = true;
+  const controller = new AbortController();
+  pollController = controller;
+  const requestTimeout = window.setTimeout(() => controller.abort(), 15000);
   try {
-    const response = await fetch(`${API_BASE}/api/jobs/${jobId}`, { cache: "no-store" });
+    const response = await fetch(`${API_BASE}/api/jobs/${jobId}`, {
+      cache: "no-store",
+      signal: controller.signal
+    });
     if (!response.ok) {
       const message = await readError(response);
       const error = new Error(message);
@@ -513,23 +560,34 @@ async function pollJob(jobId) {
       throw error;
     }
     const job = await response.json();
+    if (pollController !== controller || currentJobId !== jobId) {
+      return;
+    }
     pollFailures = 0;
     clearError();
     renderJob(job);
     if (terminalStatuses.has(job.status)) {
-      window.clearInterval(pollTimer);
-      pollTimer = null;
+      stopPolling();
       setBusy(false);
-      stopElapsedTimer();
     }
   } catch (error) {
+    if (pollController !== controller || currentJobId !== jobId) {
+      return;
+    }
     pollFailures += 1;
     const permanentMissing = error.status === 404 && pollFailures >= 3;
     if (permanentMissing) {
-      window.clearInterval(pollTimer);
-      pollTimer = null;
+      stopPolling();
       setBusy(false);
       stopElapsedTimer();
+      currentJobId = null;
+      try {
+        if (localStorage.getItem("halalstream_job_id") === jobId) {
+          localStorage.removeItem("halalstream_job_id");
+        }
+      } catch (storageError) {
+        // The result can still be shown when browser storage is disabled.
+      }
       showError(error.message || "تعذر العثور على المهمة.");
       return;
     }
@@ -538,14 +596,21 @@ async function pollJob(jobId) {
     }
     if (pollFailures >= 8) {
       showError("الاتصال بحالة المهمة متقطع، لكن المعالجة مستمرة. سنواصل التحديث تلقائياً.");
-      checkHealth();
     }
   } finally {
-    pollInFlight = false;
+    window.clearTimeout(requestTimeout);
+    if (pollController === controller) {
+      pollController = null;
+      if (pollingJobId === jobId && !document.hidden) {
+        const delay = Math.min(15000, 1300 * (2 ** Math.min(pollFailures, 4)));
+        pollTimer = window.setTimeout(() => pollJob(jobId), delay);
+      }
+    }
   }
 }
 
 function renderJob(job) {
+  syncElapsedTimer(job);
   const title = job.title || "مقطع قيد المعالجة";
   jobHeading.textContent = title;
   setStage(statusToStep[job.status] || "receive");
@@ -857,12 +922,27 @@ function toPowerShellSingleQuoted(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
 
-function startElapsedTimer(startedAtMs = Date.now()) {
+function syncElapsedTimer(job) {
+  const finished = terminalStatuses.has(job.status);
+  const start = Number(job.run_started_at || job.created_at);
+  const end = finished ? Number(job.finished_at || job.updated_at || start) : Date.now() / 1000;
+  const seconds = typeof job.elapsed_seconds === "number" && Number.isFinite(job.elapsed_seconds)
+    ? job.elapsed_seconds
+    : Math.max(0, end - start);
   stopElapsedTimer();
-  jobStartedAt = Number.isFinite(startedAtMs) ? startedAtMs : Date.now();
-  metricTime.textContent = formatTime(Math.floor((Date.now() - jobStartedAt) / 1000));
+  metricTime.textContent = formatTime(seconds);
+  if (!finished && !document.hidden) {
+    startElapsedTimer(seconds);
+  }
+}
+
+function startElapsedTimer(initialSeconds = 0) {
+  stopElapsedTimer();
+  elapsedBaseSeconds = Math.max(0, Number(initialSeconds) || 0);
+  elapsedSyncedAt = performance.now();
+  metricTime.textContent = formatTime(elapsedBaseSeconds);
   elapsedTimer = window.setInterval(() => {
-    const seconds = Math.floor((Date.now() - jobStartedAt) / 1000);
+    const seconds = elapsedBaseSeconds + (performance.now() - elapsedSyncedAt) / 1000;
     metricTime.textContent = formatTime(seconds);
   }, 1000);
 }
@@ -875,6 +955,7 @@ function stopElapsedTimer() {
 }
 
 function formatTime(seconds) {
+  seconds = Math.max(0, Number(seconds) || 0);
   const minutes = Math.floor(seconds / 60).toString().padStart(2, "0");
   const rest = Math.floor(seconds % 60).toString().padStart(2, "0");
   return `${minutes}:${rest}`;
