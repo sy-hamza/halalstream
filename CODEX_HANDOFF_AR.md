@@ -112,7 +112,7 @@ HALALSTREAM_YTDLP_COOKIES
 
 - حد مدة الرابط: `600` ثانية، يعني 10 دقائق.
 - التحميل المباشر مفعل افتراضياً: `HALALSTREAM_ALLOW_UNCHECKED_DIRECT=1`.
-- NoAdsDL مفعل افتراضياً ليوتيوب.
+- NoAdsDL مفعل افتراضياً ويُجرّب أولاً مع روابط المنصات التي يدعمها، ومنها YouTube وInstagram؛ عند فشله ينتقل الخادم إلى مسارات Cobalt و`yt-dlp` المتاحة.
 - Tunelio غير مفعل افتراضياً.
 - Modal timeout افتراضي: 1800 ثانية.
 - تقدير تكلفة Modal الافتراضي: `0.00033` دولار/ثانية تقريباً.
@@ -173,6 +173,7 @@ https://halalstream.me/admin/usage/
 
 - `cobalt_download_candidates` يرتب النتائج حتى يختار فيديو/صوت قبل الصور.
 - `validate_downloaded_media` يرفض الصور والملفات بلا صوت.
+- `download_via_noadsdl` يُجرّب أولاً للروابط المدعومة، بما فيها Instagram، ويتحقق من الملف قبل قبوله.
 - `download_via_ytdlp` يستخدم كاحتياطي للروابط الخارجية إذا Cobalt فشل.
 - `friendly_error` يحول أخطاء ffmpeg الطويلة إلى رسالة عربية قصيرة.
 
@@ -247,9 +248,22 @@ Invoke-RestMethod -Uri "https://7haydar-halalstream.hf.space/api/health" -Timeou
 
 ## آخر شغل مهم تم
 
+### وقت المهمة ومغادرة المتصفح
+
+- يسجل الخادم `run_started_at` و`finished_at` ويرجع `elapsed_seconds`؛ مدة المهمة تتوقف عند اكتمالها أو فشلها أو انتظار الموافقة، ولا تتأثر بموعد رجوع المستخدم.
+- إعادة المحاولة أو بدء التنقية بعد الموافقة يبدأ مدة جديدة. التحديثات الحسابية اللاحقة لا تغير وقت النهاية.
+- الواجهة توقف متابعة الحالة أثناء اختفاء الصفحة، وتطلب الحالة فور الرجوع أو استعادة الاتصال. الطلب المعلق ينتهي بعد 15 ثانية مع إعادة المحاولة تدريجياً.
+- عند إعادة تحميل الصفحة، تستعيد الواجهة آخر مهمة ومدتها النهائية وروابط تنزيلها.
+- المعالجة تتم على الخادم دون اعتماد على بقاء المتصفح مفتوحاً. لم تُضف إشعارات دفع للهاتف.
+- فُحصت حالات الاكتمال والفشل وانتظار الموافقة وإعادة المحاولة، ومحاكاة غياب عشر دقائق، وطلب حالة معلق، ونتيجة قديمة تصل متأخرة. نجح تحميل ملف صامت قصير محلياً دون متابعة متصفح ودون استخدام Modal.
+
 آخر commits وقت كتابة هذا الملف:
 
 ```text
+a04a179 Load the updated server-based job timer (GitHub)
+88ea8d1 Persist job completion time and sync the download fallback fix (GitHub)
+d383b3b Use server duration and refresh jobs when returning to the page (GitHub)
+137dd25 Load the updated server-based job timer (Hugging Face)
 dbf595d Validate uploaded media before purification
 88df3a9 Fix Instagram reel media validation
 8d9da07 Add admin purification pause control
@@ -292,4 +306,3 @@ git status --short
 - لا تعرض للمستخدم logs طويلة أو أسرار أو stack traces.
 - عند النشر انتظر Hugging Face حتى يلتقط commit الجديد؛ أحياناً يستغرق عدة دقائق.
 - بعد اختبار زر إيقاف التنقية على الموقع الحي، أعد تركه مفعلاً إلا إذا طلب المستخدم إيقافه.
-
