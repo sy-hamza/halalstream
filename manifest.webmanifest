@@ -1,0 +1,13 @@
+{
+  "id": "/",
+  "name": "إزالة المعازف — HalalStream",
+  "short_name": "إزالة المعازف",
+  "lang": "ar",
+  "dir": "rtl",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#eef8f5",
+  "theme_color": "#087c72",
+  "icons": [{"src": "/assets/purification-water.png", "type": "image/png", "sizes": "any", "purpose": "any"}]
+}
