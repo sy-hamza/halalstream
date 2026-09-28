@@ -73,6 +73,7 @@ ALLOW_UNCHECKED_DIRECT = os.getenv("HALALSTREAM_ALLOW_UNCHECKED_DIRECT", "1").st
 AUTO_PURIFY_ON_DETECTION = os.getenv("HALALSTREAM_AUTO_PURIFY_ON_DETECTION", "1").strip().lower() in {"1", "true", "yes"}
 ESTIMATED_PROCESSING_SECONDS = max(60, int(os.getenv("HALALSTREAM_ESTIMATED_PROCESSING_SECONDS", "240")))
 JOB_TTL_HOURS = max(1.0, float(os.getenv("HALALSTREAM_JOB_TTL_HOURS", "12")))
+TERMINAL_JOB_STATUSES = {"clean", "direct", "needs_consent", "complete", "failed"}
 CLEANUP_INTERVAL_SECONDS = max(300, int(os.getenv("HALALSTREAM_CLEANUP_INTERVAL_SECONDS", "1800")))
 MAX_UPLOAD_BYTES = max(1 * 1024 * 1024, int(os.getenv("HALALSTREAM_MAX_UPLOAD_BYTES", str(350 * 1024 * 1024))))
 MAX_REMOTE_DOWNLOAD_BYTES = max(
@@ -523,6 +524,7 @@ def create_job(
     job_id = uuid.uuid4().hex[:12]
     workdir = job_dir(job_id)
     workdir.mkdir(parents=True, exist_ok=True)
+    now = time.time()
     job = {
         "id": job_id,
         "status": "queued",
@@ -535,8 +537,10 @@ def create_job(
         "purify_mode": purify_mode,
         "quality": quality,
         "title": source_name or "مقطع من رابط",
-        "created_at": time.time(),
-        "updated_at": time.time(),
+        "created_at": now,
+        "updated_at": now,
+        "run_started_at": now,
+        "finished_at": None,
         "has_music": None,
         "instrumental_ratio": None,
         "confidence": None,
@@ -1320,7 +1324,7 @@ def download_link(job_id: str, url: str, require_audio: bool = True) -> Path:
 
     is_yt = is_youtube_url(url)
 
-    if is_yt:
+    if NOADSDL_ENABLED and requests is not None:
         try:
             media_path, title = download_via_noadsdl(job_id, url, workdir, require_audio=require_audio)
             update_job(
@@ -1337,8 +1341,9 @@ def download_link(job_id: str, url: str, require_audio: bool = True) -> Path:
             raise
         except Exception as exc:
             download_errors.append(f"NoAdsDL: {exc}")
-            update_job(job_id, message="تعذر الخادم المجاني الأساسي. نجرب خادماً مجتمعياً.")
+            update_job(job_id, message="تعذر خادم التنزيل الأول. نجرب خادماً مسانداً.")
 
+    if is_yt:
         try:
             media_path = download_via_cobalt(job_id, url, workdir, require_audio=require_audio)
             update_job(
@@ -2665,8 +2670,18 @@ def update_job(job_id: str, **updates: Any) -> None:
     with jobs_lock:
         if job_id not in jobs:
             return
-        jobs[job_id].update(updates)
-        jobs[job_id]["updated_at"] = time.time()
+        job = jobs[job_id]
+        now = time.time()
+        previous_status = job["status"]
+        job.update(updates)
+        if job["status"] in TERMINAL_JOB_STATUSES:
+            # Later bookkeeping must not extend a completed run's duration.
+            if not job.get("finished_at"):
+                job["finished_at"] = now
+        elif previous_status in TERMINAL_JOB_STATUSES:
+            job["run_started_at"] = now
+            job["finished_at"] = None
+        job["updated_at"] = now
     persist_job(job_id)
 
 
@@ -2689,6 +2704,12 @@ def public_job(job_id: str) -> Optional[Dict[str, Any]]:
             "clean_audio_path",
         }
     }
+    started_at = float(job.get("run_started_at") or job["created_at"])
+    finished_at = job.get("finished_at")
+    if job["status"] in TERMINAL_JOB_STATUSES:
+        finished_at = finished_at or job.get("updated_at") or started_at
+    public["finished_at"] = finished_at
+    public["elapsed_seconds"] = round(max(0.0, (finished_at or time.time()) - started_at), 3)
     public["can_download_original"] = job["status"] in {"clean", "direct"}
     public["can_purify"] = job["status"] == "needs_consent"
     public["can_download_purified"] = job["status"] == "complete"
@@ -3122,12 +3143,16 @@ def load_persisted_jobs() -> None:
             data.setdefault("queue_position", 0)
             data.setdefault("queue_length", 0)
             data.setdefault("estimated_wait_seconds", 0)
+            data.setdefault("run_started_at", data.get("created_at"))
+            data.setdefault("finished_at", data.get("updated_at") if data.get("status") in TERMINAL_JOB_STATUSES else None)
             if data.get("status") in active_statuses:
                 data["status"] = "failed"
                 data["stage"] = "توقفت المعالجة"
                 data["progress"] = 0
                 data["message"] = "توقف الخادم أثناء العمل. اضغط إعادة المحاولة ليكمل من الملف المحفوظ إن كان موجوداً."
                 data["error"] = "Server restarted while job was active."
+                data["finished_at"] = time.time()
+                data["updated_at"] = data["finished_at"]
                 path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             with jobs_lock:
                 jobs[data["id"]] = data
