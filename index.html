@@ -6,11 +6,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>إزالة المعازف | HalalStream</title>
   <meta name="description" content="منصة لإزالة المعازف من المقاطع قبل التحميل." />
+  <meta name="theme-color" content="#087c72" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="assets/purification-water.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700;800&display=swap"
     rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=safety-ui-v2" />
+  <link rel="stylesheet" href="styles.css?v=history-push-v4" />
 </head>
 
 <body>
@@ -172,6 +175,13 @@
             <p class="form-error" id="form-error" role="alert" hidden></p>
           </form>
 
+          <div class="notification-settings" aria-label="إشعارات المقاطع">
+            <strong>اعرف متى يصبح مقطعك جاهزاً</strong>
+            <p id="notification-status" role="status">فعّل الإشعارات لتنبيهك عند اكتمال المقاطع، حتى أثناء مغادرة الصفحة.</p>
+            <button class="secondary-button" id="notification-toggle" type="button">تفعيل إشعارات المقاطع</button>
+            <p id="notification-ios-help" hidden>على آيفون: افتح الموقع في سفاري، ثم اضغط مشاركة ← إضافة إلى الشاشة الرئيسية. افتحه من الأيقونة الجديدة وفعّل الإشعارات.</p>
+          </div>
+
           <div class="source-insights" aria-label="معلومات التشغيل">
             <div>
               <strong>الوضع</strong>
@@ -189,6 +199,7 @@
             <p>المعالجة</p>
             <h2 id="job-heading">بانتظار مقطع</h2>
           </div>
+          <p class="result-expiry" id="result-expiry" hidden></p>
 
           <div class="stage-track" aria-label="مراحل المعالجة">
             <span class="stage-step is-active" data-step="receive">استقبال</span>
@@ -264,10 +275,9 @@
             <h3>تم رصد معازف</h3>
             <p id="warning-ratio" style="margin: 12px 0 6px 0; font-weight: bold; color: var(--rose);" hidden></p>
             <p class="hadith">
-              قال رسول الله صلى الله عليه وسلم: «لَيَكُونَنَّ مِنْ أُمَّتِي أَقْوَامٌ يَسْتَحِلُّونَ الْحِرَ،
-              وَالْحَرِيرَ، وَالْخَمْرَ، وَالْمَعَازِفَ»
-              <a href="https://sunnah.com/bukhari:5590" target="_blank" rel="noopener">صحيح البخاري 5590</a>.
-            </p>
+      قال رسول الله صلى الله عليه وسلم: «لَيَكُونَنَّ مِنْ أُمَّتِي أَقْوَامٌ يَسْتَحِلُّونَ الْحِرَ، وَالْحَرِيرَ،
+      وَالْخَمْرَ، وَالْمَعَازِفَ» صحيح البخاري 5590.
+    </p>
             <p>
               أخي الغالي/أختي الكريمة، إن سماع المعازف يمرض القلب، وترك ما حرم الله خطوة مباركة نحو رضاه. دعنا نزيل
               المعازف ونبقي الصوت النافع قدر الإمكان.
@@ -326,6 +336,17 @@
           </div>
         </div>
       </section>
+      <section class="history-panel" aria-labelledby="history-heading">
+        <div class="history-header">
+          <div><p class="kicker">مقاطعك الأخيرة</p><h2 id="history-heading">ارجع لنتائجك بسهولة</h2></div>
+          <div class="history-actions">
+            <button class="secondary-button" id="history-refresh" type="button">تحديث السجل</button>
+            <button class="secondary-button" id="history-clear" type="button">مسح السجل من الجهاز</button>
+          </div>
+        </div>
+        <p id="history-status" role="status">يُحفظ آخر 20 مقطعاً في هذا المتصفح فقط. قد تنتهي إتاحة الملفات مبكراً عند صيانة الخدمة.</p>
+        <ul class="history-list" id="history-list"></ul>
+      </section>
     </main>
   </div>
 
@@ -338,7 +359,7 @@
     <span>للتواصل عند حصول مشاكل</span>
   </a>
 
-  <script src="app.js?v=server-timing-v3" defer></script>
+  <script src="app.js?v=history-push-v4" defer></script>
 </body>
 
 </html>
