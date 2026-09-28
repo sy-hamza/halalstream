@@ -1,4 +1,4 @@
-const API_BASE = window.location.hostname.includes("hf.space") 
+const API_BASE = window.location.hostname.includes("hf.space") || ["localhost", "127.0.0.1"].includes(window.location.hostname)
   ? "" 
   : "https://7haydar-halalstream.hf.space";
 
@@ -153,6 +153,9 @@ mediaForm.addEventListener("submit", async (event) => {
 
     const jobId = await createJob();
     currentJobId = jobId;
+    rememberJob({ id: jobId, status: "queued", title: activeMode === "file" ? mediaFile.files[0]?.name : "مقطع قيد المعالجة", created_at: Date.now() / 1000 });
+    attachJobNotification(jobId);
+    clearJobQuery();
     try {
       localStorage.setItem("halalstream_job_id", jobId);
     } catch (e) {
@@ -422,11 +425,13 @@ async function restoreLatestJob() {
     return;
   }
   try {
-    const savedJobId = localStorage.getItem("halalstream_job_id");
+    const linkedJobId = new URLSearchParams(window.location.search).get("job");
+    const savedJobId = /^[a-f0-9]{12}$/.test(linkedJobId || "") ? linkedJobId : localStorage.getItem("halalstream_job_id");
     if (!savedJobId) {
       return;
     }
     currentJobId = savedJobId;
+    clearJobQuery();
     setBusy(true);
     appendLog("استعدنا آخر مهمة محفوظة لجهازك.");
     startPolling(savedJobId);
@@ -581,6 +586,7 @@ async function pollJob(jobId) {
       setBusy(false);
       stopElapsedTimer();
       currentJobId = null;
+      rememberJob({ id: jobId, status: "expired" });
       try {
         if (localStorage.getItem("halalstream_job_id") === jobId) {
           localStorage.removeItem("halalstream_job_id");
@@ -610,6 +616,7 @@ async function pollJob(jobId) {
 }
 
 function renderJob(job) {
+  rememberJob(job);
   syncElapsedTimer(job);
   const title = job.title || "مقطع قيد المعالجة";
   jobHeading.textContent = title;
@@ -618,6 +625,7 @@ function renderJob(job) {
   updateSignalMetric(job);
   appendLog(humanLog(job));
   hideResultCards();
+  showJobExpiry(job);
 
   if (job.status === "clean" || job.status === "direct") {
     setDownloadLink(cleanVideoDownload, job.download_urls?.video || job.download_url);
@@ -1023,3 +1031,286 @@ async function readError(response) {
     return "حدث خطأ في الخادم.";
   }
 }
+
+const historyStorageKey = "halalstream_history_v1";
+const notificationPreferenceKey = "halalstream_notifications_v1";
+let historyEntries = loadJobHistory();
+let historyRequest = null;
+let pushSubscription = null;
+let pushSubscriptionRequest = null;
+let pushRegistration = null;
+let notificationsEnabled = readNotificationPreference();
+const attachedNotificationJobs = new Set();
+
+function loadJobHistory() {
+  try {
+    const data = JSON.parse(localStorage.getItem("halalstream_history_v1") || "[]");
+    return Array.isArray(data) ? data.filter(item => item && /^[a-f0-9]{12}$/.test(item.id)).slice(0, 20) : [];
+  } catch (error) { return []; }
+}
+
+function readNotificationPreference() {
+  try { return localStorage.getItem("halalstream_notifications_v1") === "1"; }
+  catch (error) { return false; }
+}
+
+function rememberJob(job) {
+  if (!job || !/^[a-f0-9]{12}$/.test(job.id)) return;
+  const previous = historyEntries.find(item => item.id === job.id) || {};
+  const item = { ...previous, id: job.id };
+  for (const key of ["title", "status", "created_at", "finished_at", "elapsed_seconds", "expires_at"]) {
+    if (job[key] !== undefined) item[key] = job[key];
+  }
+  item.title = String(item.title || "مقطع محفوظ").slice(0, 180);
+  historyEntries = [item, ...historyEntries.filter(entry => entry.id !== item.id)]
+    .sort((a, b) => (Number(b.created_at) || 0) - (Number(a.created_at) || 0)).slice(0, 20);
+  try { localStorage.setItem(historyStorageKey, JSON.stringify(historyEntries)); }
+  catch (error) { setHistoryMessage("تعذر حفظ السجل في هذا المتصفح. يبقى المقطع الحالي متاحاً ما دامت الصفحة مفتوحة."); }
+  renderHistory();
+}
+
+function setHistoryMessage(message) {
+  const node = document.querySelector("#history-status");
+  if (node) node.textContent = message;
+}
+
+function expiryText(expiresAt) {
+  if (!Number.isFinite(Number(expiresAt)) || !expiresAt) return "";
+  if (Number(expiresAt) * 1000 <= Date.now()) return "انتهت صلاحية الملف";
+  return `متاح حتى ${new Date(Number(expiresAt) * 1000).toLocaleString("ar", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`;
+}
+
+function showJobExpiry(job) {
+  const node = document.querySelector("#result-expiry");
+  if (!node) return;
+  const ready = ["clean", "direct", "complete"].includes(job?.status);
+  node.textContent = ready ? expiryText(job.expires_at) : "";
+  node.hidden = !node.textContent;
+}
+
+function renderHistory() {
+  const list = document.querySelector("#history-list");
+  if (!list) return;
+  list.replaceChildren();
+  if (!historyEntries.length) {
+    const empty = document.createElement("li");
+    empty.textContent = "ستظهر مقاطعك هنا بعد إرسال أول مقطع.";
+    list.append(empty);
+    return;
+  }
+  for (const job of historyEntries) {
+    const expired = job.status === "expired" || (job.expires_at && Number(job.expires_at) * 1000 <= Date.now());
+    const row = document.createElement("li");
+    row.className = `history-item${expired ? " is-expired" : ""}`;
+    const copy = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = String(job.title || "مقطع محفوظ").slice(0, 180);
+    const detail = document.createElement("small");
+    const status = expired ? "الملف غير متاح أو انتهت صلاحيته" : job.status === "failed" ? "تعذرت المعالجة" : humanStage(job);
+    detail.textContent = [status, typeof job.elapsed_seconds === "number" ? `المدة ${formatTime(job.elapsed_seconds)}` : "", expired ? "" : expiryText(job.expires_at)].filter(Boolean).join(" · ");
+    copy.append(title, detail);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-button";
+    button.textContent = expired ? "غير متاح" : "عرض المقطع";
+    button.disabled = Boolean(expired);
+    button.addEventListener("click", () => openSavedJob(job.id));
+    row.append(copy, button);
+    list.append(row);
+  }
+}
+
+function openSavedJob(jobId) {
+  stopPolling();
+  stopElapsedTimer();
+  currentJobId = jobId;
+  hideResultCards();
+  showJobExpiry(null);
+  setBusy(true);
+  clearError();
+  updateStatus("استعادة المقطع", "نتحقق من توفر النتيجة على الخادم.", 0);
+  try { localStorage.setItem("halalstream_job_id", jobId); } catch (error) { /* Optional storage. */ }
+  startPolling(jobId);
+}
+
+function clearJobQuery() {
+  if (!window.location.search) return;
+  const url = new URL(window.location.href);
+  if (url.searchParams.has("job")) {
+    url.searchParams.delete("job");
+    window.history.replaceState(null, "", url);
+  }
+}
+
+async function refreshHistory() {
+  renderHistory();
+  if (document.hidden || historyRequest || !historyEntries.length) return;
+  const controller = new AbortController();
+  historyRequest = controller;
+  const timeout = window.setTimeout(() => controller.abort(), 15000);
+  const ids = historyEntries.map(item => item.id);
+  try {
+    const response = await fetch(`${API_BASE}/api/jobs/history`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }), signal: controller.signal, cache: "no-store"
+    });
+    if (!response.ok) throw new Error("history unavailable");
+    const payload = await response.json();
+    for (const job of payload.jobs || []) {
+      // Clearing history while this request is in flight must keep it cleared.
+      if (historyEntries.some(entry => entry.id === job.id)) rememberJob(job);
+    }
+    setHistoryMessage("يُحفظ آخر 20 مقطعاً في هذا المتصفح فقط. قد تنتهي إتاحة الملفات مبكراً عند صيانة الخدمة.");
+  } catch (error) {
+    if (!document.hidden) setHistoryMessage("تعذر تحديث السجل الآن. مقاطعك المحفوظة ما زالت ظاهرة؛ جرّب التحديث عند عودة الاتصال.");
+  } finally {
+    window.clearTimeout(timeout);
+    if (historyRequest === controller) historyRequest = null;
+  }
+}
+
+function notificationMessage(message) {
+  const node = document.querySelector("#notification-status");
+  if (node) node.textContent = message;
+}
+
+function notificationButton() {
+  const button = document.querySelector("#notification-toggle");
+  if (button) button.textContent = notificationsEnabled ? "إيقاف إشعارات المقاطع" : "تفعيل إشعارات المقاطع";
+}
+
+async function ensurePushSubscription() {
+  if (pushSubscription) return pushSubscription;
+  if (pushSubscriptionRequest) return pushSubscriptionRequest;
+  pushSubscriptionRequest = createPushSubscription();
+  try { return await pushSubscriptionRequest; }
+  finally { pushSubscriptionRequest = null; }
+}
+
+async function createPushSubscription() {
+  const response = await fetch(`${API_BASE}/api/notifications/config`, { cache: "no-store", signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new Error("خدمة الإشعارات غير متاحة حالياً.");
+  const config = await response.json();
+  if (!config.enabled || !config.public_key) throw new Error("خدمة الإشعارات غير متاحة حالياً.");
+  const registration = await pushRegistration;
+  await navigator.serviceWorker.ready;
+  const raw = atob(config.public_key.replaceAll("-", "+").replaceAll("_", "/"));
+  const key = Uint8Array.from(raw, char => char.charCodeAt(0));
+  let subscription = await registration.pushManager.getSubscription();
+  if (subscription) {
+    const existing = new Uint8Array(subscription.options.applicationServerKey || []);
+    if (existing.length !== key.length || existing.some((value, index) => value !== key[index])) {
+      await subscription.unsubscribe();
+      subscription = null;
+    }
+  }
+  pushSubscription = subscription || await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+  return pushSubscription;
+}
+
+async function attachJobNotification(jobId) {
+  if (!notificationsEnabled || !pushRegistration || attachedNotificationJobs.has(jobId)) return;
+  try {
+    const subscription = await ensurePushSubscription();
+    if (!notificationsEnabled) return;
+    const response = await fetch(`${API_BASE}/api/jobs/${jobId}/notification`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subscription: subscription.toJSON() }), signal: AbortSignal.timeout(15000)
+    });
+    if (!response.ok) throw new Error("تعذر ربط إشعار هذا المقطع. تابع حالته من السجل.");
+    attachedNotificationJobs.add(jobId);
+  } catch (error) {
+    notificationMessage(error.message || "تعذر ربط إشعار هذا المقطع. تابع حالته من السجل.");
+  }
+}
+
+async function toggleNotifications() {
+  const button = document.querySelector("#notification-toggle");
+  button.disabled = true;
+  try {
+    if (notificationsEnabled) {
+      const registration = await pushRegistration;
+      const subscription = pushSubscription || await registration.pushManager.getSubscription();
+      if (subscription) {
+        const endpoint = subscription.endpoint;
+        await subscription.unsubscribe();
+        await Promise.allSettled(historyEntries.map(job => fetch(`${API_BASE}/api/jobs/${job.id}/notification`, {
+          method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint }), signal: AbortSignal.timeout(10000)
+        })));
+      }
+      pushSubscription = null;
+      notificationsEnabled = false;
+      attachedNotificationJobs.clear();
+      notificationMessage("أوقفت إشعارات المقاطع لهذا المتصفح.");
+    } else {
+      // Keep the permission request directly within the user's click (required on iOS).
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") {
+        notificationMessage("لم تُفعّل الإشعارات. يمكنك السماح بها لاحقاً من إعدادات الموقع في المتصفح.");
+        return;
+      }
+      await ensurePushSubscription();
+      notificationsEnabled = true;
+      notificationMessage("الإشعارات مفعّلة. سننبهك عند اكتمال المقاطع الجديدة، بحسب اتصال جهازك وإعدادات التنبيهات.");
+      if (currentJobId && pollingJobId) await attachJobNotification(currentJobId);
+    }
+    try { localStorage.setItem(notificationPreferenceKey, notificationsEnabled ? "1" : "0"); } catch (error) { /* Works for this page. */ }
+  } catch (error) {
+    notificationMessage(error.message || "تعذر تفعيل الإشعارات. جرّب مرة أخرى.");
+  } finally {
+    button.disabled = false;
+    notificationButton();
+  }
+}
+
+function setupExtras() {
+  renderHistory();
+  document.querySelector("#history-refresh")?.addEventListener("click", refreshHistory);
+  document.querySelector("#history-clear")?.addEventListener("click", () => {
+    if (!window.confirm("مسح سجل المقاطع من هذا الجهاز؟ الملفات على الخادم لن تُحذف.")) return;
+    historyEntries = [];
+    try { localStorage.removeItem(historyStorageKey); localStorage.removeItem("halalstream_job_id"); } catch (error) { /* Optional storage. */ }
+    renderHistory();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) historyRequest?.abort();
+    else { refreshHistory(); refreshPurificationAvailability(); }
+  });
+  window.addEventListener("online", () => { refreshHistory(); refreshPurificationAvailability(); });
+  refreshHistory();
+  const button = document.querySelector("#notification-toggle");
+  if (!button || typeof navigator === "undefined") return;
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const installed = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+  const iosHelp = document.querySelector("#notification-ios-help");
+  if (isIOS && !installed && iosHelp) iosHelp.hidden = false;
+  if (!window.isSecureContext || !("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window) || (isIOS && !installed)) {
+    button.disabled = true;
+    notificationMessage(isIOS && !installed ? "أضف الموقع إلى الشاشة الرئيسية أولاً لتفعيل إشعارات آيفون." : "هذا المتصفح لا يدعم إشعارات الخلفية. يمكنك الرجوع لسجل المقاطع في أي وقت.");
+    return;
+  }
+  if (Notification.permission !== "granted") notificationsEnabled = false;
+  pushRegistration = navigator.serviceWorker.register("/sw.js");
+  pushRegistration.catch(() => notificationMessage("تعذر تجهيز الإشعارات. حدّث الصفحة وحاول مجدداً."));
+  button.addEventListener("click", toggleNotifications);
+  notificationButton();
+  if (notificationsEnabled) {
+    notificationMessage("إشعارات المقاطع مفعّلة في هذا المتصفح.");
+    for (const job of historyEntries.filter(item => !terminalStatuses.has(item.status) && item.status !== "expired")) attachJobNotification(job.id);
+  }
+}
+
+async function refreshPurificationAvailability() {
+  if (document.hidden) return;
+  try {
+    const response = await fetch(`${API_BASE}/api/health`, { cache: "no-store", signal: AbortSignal.timeout(15000) });
+    if (!response.ok) return;
+    const health = await response.json();
+    purificationEnabled = health.purification_enabled !== false;
+    purificationPausedMessage = health.purification_disabled_message || purificationPausedMessage;
+    engineMode.textContent = purificationEnabled ? (health.modal_purify_enabled ? "تنقية Modal" : "تنقية صارمة") : "التنقية متوقفة";
+    engineJobs.textContent = purificationEnabled ? (health.modal_purify_enabled ? "GPU عند الطلب" : "آمن") : "التحميل المباشر متاح";
+  } catch (error) { /* The form will report a connection error if needed. */ }
+}
+
+setupExtras();
