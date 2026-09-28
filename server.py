@@ -17,6 +17,9 @@ import traceback
 import urllib.request
 import uuid
 import wave
+import hashlib
+from copy import deepcopy
+from site_services import DailyBudget, WebPush, atomic_json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,7 +30,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, HttpUrl, Field
 
 try:
     import imageio_ffmpeg
@@ -47,6 +50,7 @@ except Exception:  # pragma: no cover - optional external worker client
 
 ROOT = Path(__file__).resolve().parent
 STORAGE = Path(os.getenv("HALALSTREAM_STORAGE_DIR", ROOT / "storage")).resolve()
+STATE_DIR = Path(os.getenv("HALALSTREAM_STATE_DIR", STORAGE / "state")).resolve()
 JOBS_DIR = STORAGE / "jobs"
 USAGE_LOG = STORAGE / "usage.jsonl"
 CONTROL_FILE = STORAGE / "control.json"
@@ -227,6 +231,8 @@ jobs: Dict[str, Dict[str, Any]] = {}
 jobs_lock = threading.Lock()
 usage_lock = threading.Lock()
 control_lock = threading.Lock()
+persist_lock = threading.Lock()
+notification_event = threading.Event()
 processing_semaphore = threading.BoundedSemaphore(MAX_ACTIVE_PROCESSING_JOBS)
 queue_lock = threading.Lock()
 waiting_processing_jobs: list[str] = []
@@ -238,6 +244,81 @@ class LinkJobRequest(BaseModel):
     url: HttpUrl
     purify_mode: str = "purify"
     quality: str = "high"
+
+
+class HistoryRequest(BaseModel):
+    ids: list[str] = Field(default_factory=list, max_length=20)
+
+
+class PushRequest(BaseModel):
+    subscription: Dict[str, Any]
+
+
+class PushDeleteRequest(BaseModel):
+    endpoint: str = Field(max_length=2048)
+
+
+@app.get("/sw.js")
+def service_worker() -> FileResponse:
+    return FileResponse(ROOT / "sw.js", media_type="application/javascript", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/manifest.webmanifest")
+def web_manifest() -> FileResponse:
+    return FileResponse(ROOT / "manifest.webmanifest", media_type="application/manifest+json")
+
+
+@app.get("/api/notifications/config")
+def notification_config() -> Dict[str, Any]:
+    return web_push.config()
+
+
+@app.post("/api/jobs/history")
+def job_history(payload: HistoryRequest) -> Dict[str, Any]:
+    result = []
+    for job_id in dict.fromkeys(payload.ids):
+        if not re.fullmatch(r"[a-f0-9]{12}", job_id):
+            continue
+        job = public_job(job_id)
+        result.append(job or {"id": job_id, "status": "expired"})
+    return {"jobs": result}
+
+
+@app.post("/api/jobs/{job_id}/notification")
+def subscribe_job_notification(job_id: str, payload: PushRequest) -> Dict[str, bool]:
+    if not public_job(job_id):
+        raise HTTPException(status_code=404, detail="المهمة غير موجودة أو انتهت صلاحيتها.")
+    if not web_push.config()["enabled"]:
+        raise HTTPException(status_code=503, detail="الإشعارات غير متاحة مؤقتاً.")
+    try:
+        subscription = web_push.validate(payload.subscription)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="تعذر التحقق من اشتراك الإشعارات.")
+    key = hashlib.sha256(subscription["endpoint"].encode()).hexdigest()
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="المهمة غير موجودة.")
+        subscriptions = job.setdefault("_notifications", {})
+        if key not in subscriptions and len(subscriptions) >= 3:
+            raise HTTPException(status_code=429, detail="وصلت المهمة إلى حد أجهزة الإشعارات.")
+        previous = subscriptions.get(key, {})
+        subscriptions[key] = {**previous, "subscription": subscription}
+    persist_job(job_id)
+    notification_event.set()
+    return {"ok": True}
+
+
+@app.delete("/api/jobs/{job_id}/notification")
+def unsubscribe_job_notification(job_id: str, payload: PushDeleteRequest) -> Dict[str, bool]:
+    key = hashlib.sha256(payload.endpoint.encode()).hexdigest()
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job:
+            job.get("_notifications", {}).pop(key, None)
+    if job:
+        persist_job(job_id)
+    return {"ok": True}
 
 
 @app.get("/")
@@ -412,7 +493,8 @@ async def create_upload_job(
 
 
 @app.get("/api/jobs/latest")
-def latest_job() -> Dict[str, Any]:
+def latest_job(credentials: Optional[HTTPBasicCredentials] = Depends(admin_security)) -> Dict[str, Any]:
+    require_admin(credentials)
     with jobs_lock:
         latest = max(jobs.values(), key=lambda item: item.get("updated_at", 0), default=None)
     if not latest:
@@ -481,7 +563,7 @@ def retry(job_id: str) -> Dict[str, str]:
 @app.get("/api/jobs/{job_id}/download")
 def download(job_id: str, kind: str = "purified") -> FileResponse:
     job = get_internal_job(job_id)
-    if not job:
+    if not job or job_is_expired(job):
         raise HTTPException(status_code=404, detail="لم يتم العثور على المهمة.")
 
     if kind == "original":
@@ -720,6 +802,8 @@ def process_job_with_modal(job_id: str, original: Path) -> None:
     )
     last_error = None
     for attempt in range(1, 4):
+        ensure_purification_enabled_for_worker()
+        reservation = daily_budget.reserve()
         attempt_started = time.time()
         response_status = None
         result_status = None
@@ -756,9 +840,11 @@ def process_job_with_modal(job_id: str, original: Path) -> None:
                 response_status=response_status,
                 result_status=result_status,
             )
+            daily_budget.settle(reservation, (time.time() - attempt_started) * MODAL_ESTIMATED_USD_PER_SECOND)
             break
         except Exception as exc:
             last_error = exc
+            daily_budget.settle(reservation, (time.time() - attempt_started) * MODAL_ESTIMATED_USD_PER_SECOND, uncertain=True)
             record_modal_usage(
                 job_id,
                 attempt,
@@ -2625,7 +2711,7 @@ def cleanup_expired_jobs() -> int:
         for job_id, job in list(jobs.items()):
             if job.get("status") in active_statuses:
                 continue
-            updated_at = float(job.get("updated_at") or job.get("created_at") or now)
+            updated_at = float(job.get("finished_at") or job.get("updated_at") or job.get("created_at") or now)
             if now - updated_at >= ttl_seconds:
                 expired_ids.append(job_id)
         for job_id in expired_ids:
@@ -2663,7 +2749,7 @@ def job_dir(job_id: str) -> Path:
 def get_internal_job(job_id: str) -> Optional[Dict[str, Any]]:
     with jobs_lock:
         job = jobs.get(job_id)
-        return dict(job) if job else None
+        return deepcopy(job) if job else None
 
 
 def update_job(job_id: str, **updates: Any) -> None:
@@ -2683,11 +2769,24 @@ def update_job(job_id: str, **updates: Any) -> None:
             job["finished_at"] = None
         job["updated_at"] = now
     persist_job(job_id)
+    if updates.get("status") in TERMINAL_JOB_STATUSES:
+        notification_event.set()
+
+
+def job_expires_at(job: Dict[str, Any]) -> Optional[float]:
+    if job.get("status") not in TERMINAL_JOB_STATUSES:
+        return None
+    return float(job.get("finished_at") or job.get("updated_at") or job["created_at"]) + JOB_TTL_HOURS * 3600
+
+
+def job_is_expired(job: Dict[str, Any]) -> bool:
+    expires = job_expires_at(job)
+    return expires is not None and time.time() >= expires
 
 
 def public_job(job_id: str) -> Optional[Dict[str, Any]]:
     job = get_internal_job(job_id)
-    if not job:
+    if not job or job_is_expired(job):
         return None
     public = {
         key: value
@@ -2702,6 +2801,7 @@ def public_job(job_id: str) -> Optional[Dict[str, Any]]:
             "purified_path",
             "purified_audio_path",
             "clean_audio_path",
+            "_notifications",
         }
     }
     started_at = float(job.get("run_started_at") or job["created_at"])
@@ -2709,6 +2809,7 @@ def public_job(job_id: str) -> Optional[Dict[str, Any]]:
     if job["status"] in TERMINAL_JOB_STATUSES:
         finished_at = finished_at or job.get("updated_at") or started_at
     public["finished_at"] = finished_at
+    public["expires_at"] = job_expires_at(job)
     public["elapsed_seconds"] = round(max(0.0, (finished_at or time.time()) - started_at), 3)
     public["can_download_original"] = job["status"] in {"clean", "direct"}
     public["can_purify"] = job["status"] == "needs_consent"
@@ -2732,11 +2833,55 @@ def public_job(job_id: str) -> Optional[Dict[str, Any]]:
 
 
 def persist_job(job_id: str) -> None:
-    job = get_internal_job(job_id)
-    if not job:
-        return
-    path = job_dir(job_id) / "job.json"
-    path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+    with persist_lock:
+        job = get_internal_job(job_id)
+        if job:
+            atomic_json(job_dir(job_id) / "job.json", job)
+
+
+def deliver_job_notifications() -> None:
+    with jobs_lock:
+        pending = [deepcopy(job) for job in jobs.values() if job.get("_notifications") and job["status"] in TERMINAL_JOB_STATUSES]
+    for job in pending:
+        if job_is_expired(job):
+            continue
+        version = str(job.get("finished_at") or job["updated_at"])
+        for key, entry in job["_notifications"].items():
+            if entry.get("sent_version") == version or (entry.get("version") == version and
+                    (entry.get("attempts", 0) >= 5 or entry.get("retry_at", 0) > time.time())):
+                continue
+            attempts = entry.get("attempts", 0) + 1 if entry.get("version") == version else 1
+            ready = job["status"] in {"clean", "direct", "complete"}
+            payload = {"title": "مقطعك جاهز للتحميل" if ready else "تحديث على مقطعك",
+                       "body": "اكتملت المعالجة. اضغط لعرض النتيجة وتنزيلها." if ready else "افتح الموقع للاطلاع على حالة المقطع والخطوة التالية.",
+                       "url": f"/?job={job['id']}", "tag": f"halalstream-{job['id']}"}
+            outcome = {"version": version, "attempts": attempts, "retry_at": time.time() + min(300, 15 * 2 ** attempts)}
+            remove = False
+            try:
+                web_push.send(entry["subscription"], payload, job_expires_at(job) - time.time())
+                outcome["sent_version"] = version
+            except Exception as exc:
+                response = getattr(exc, "response", None)
+                remove = response is not None and response.status_code in {404, 410}
+                print(f"Notification delivery deferred for {job['id']}: {type(exc).__name__}")
+            with jobs_lock:
+                current = jobs.get(job["id"], {}).get("_notifications", {})
+                if key in current:
+                    if remove:
+                        current.pop(key, None)
+                    else:
+                        current[key].update(outcome)
+            persist_job(job["id"])
+
+
+def notification_worker() -> None:
+    while True:
+        notification_event.wait(15)
+        notification_event.clear()
+        try:
+            deliver_job_notifications()
+        except Exception as exc:
+            print(f"Notification worker will retry: {type(exc).__name__}")
 
 
 def require_admin(credentials: Optional[HTTPBasicCredentials]) -> None:
@@ -2796,20 +2941,23 @@ def write_control_state(state: Dict[str, Any]) -> None:
     current["updated_at"] = datetime.now(timezone.utc).isoformat()
     with control_lock:
         CONTROL_FILE.parent.mkdir(parents=True, exist_ok=True)
-        CONTROL_FILE.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_json(CONTROL_FILE, current)
 
 
 def purification_enabled() -> bool:
-    return bool(read_control_state().get("purification_enabled", True))
+    return bool(read_control_state().get("purification_enabled", True)) and not daily_budget.snapshot()["blocked"]
 
 
 def purification_disabled_message() -> str:
+    if read_control_state().get("purification_enabled", True) and daily_budget.snapshot()["blocked"]:
+        return "بلغت التنقية الحد اليومي التقديري. تتجدد الإتاحة بعد منتصف الليل بتوقيت إسطنبول؛ التحميل المباشر متاح."
     return str(read_control_state().get("purification_disabled_message") or PURIFICATION_DISABLED_MESSAGE)
 
 
 def set_purification_enabled(enabled: bool) -> None:
     write_control_state(
         {
+            **read_control_state(),
             "purification_enabled": bool(enabled),
             "purification_disabled_message": PURIFICATION_DISABLED_MESSAGE,
         }
@@ -2927,6 +3075,7 @@ def usage_stats(events: list[Dict[str, Any]], start: datetime, end: datetime) ->
 
 
 def render_usage_dashboard(events: list[Dict[str, Any]]) -> str:
+    budget = daily_budget.snapshot()
     tz = usage_timezone()
     now = datetime.now(tz)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -3039,6 +3188,13 @@ def render_usage_dashboard(events: list[Dict[str, Any]]) -> str:
         <input type="hidden" name="token" value="{admin_action_token()}" />
         <button class="{action_class}" type="submit">{html.escape(action_label)}</button>
       </form>
+    </section>
+    <section class="control">
+      <div>
+        <strong>حد التنقية اليومي: ${budget['limit_usd']:.2f}</strong>
+        <p>المستهلك تقديرياً: ${budget['spent_usd']:.3f} — المحجوز للعمليات الجارية: ${budget['reserved_usd']:.3f} — المتبقي: ${budget['remaining_usd']:.3f}</p>
+        <small>يتجدد عند منتصف الليل بتوقيت إسطنبول. نحجز تكلفة المهلة القصوى قبل كل محاولة ثم نحرر الفرق عند نجاحها؛ قد تتوقف الطلبات قبل بلوغ الحد. هذا سجل تقديري محلي قد يُعاد عند إعادة بناء الاستضافة؛ حد الإنفاق المدفوع في مزود التنقية هو الحماية الأساسية.</small>
+      </div>
     </section>
     <div class="cards">{card_html}</div>
     <table>
@@ -3160,6 +3316,12 @@ def load_persisted_jobs() -> None:
             continue
 
 
+STATE_DIR.mkdir(parents=True, exist_ok=True)
+daily_budget = DailyBudget(STATE_DIR / "daily-budget.json", 2.0,
+                           MODAL_PURIFY_TIMEOUT * MODAL_ESTIMATED_USD_PER_SECOND,
+                           usage_timezone(), read_usage_events())
+web_push = WebPush(STATE_DIR, "https://halalstream.me")
+threading.Thread(target=notification_worker, daemon=True).start()
 load_persisted_jobs()
 cleanup_expired_jobs()
 start_cleanup_worker()
